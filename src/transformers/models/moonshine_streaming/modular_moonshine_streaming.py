@@ -22,7 +22,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ...cache_utils import Cache, DynamicCache, EncoderDecoderCache
-from ...generation import GenerationMixin
 from ...modeling_attn_mask_utils import (
     _prepare_4d_attention_mask,
     _prepare_4d_attention_mask_for_sdpa,
@@ -35,7 +34,6 @@ from ...modeling_outputs import (
     Seq2SeqLMOutput,
     Seq2SeqModelOutput,
 )
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...utils import logging
 from ..moonshine.modeling_moonshine import (
     MoonshineAttention,
@@ -139,6 +137,7 @@ def make_sliding_window_mask(seq_len: int, n_past: int, n_future: int, device: t
     q_idx = torch.arange(seq_len, device=device).unsqueeze(1)
     kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)
     return (kv_idx >= q_idx - n_past) & (kv_idx <= q_idx + n_future)
+
 
 class MoonshineStreamingRotaryEmbedding(nn.Module):
     def __init__(
@@ -558,7 +557,9 @@ class MoonshineStreamingEncoder(nn.Module):
                 attention_mask = attention_mask.to(dtype=torch.long)
                 lengths = attention_mask.sum(-1)
                 seq_len_audio = attention_mask.shape[-1]
-                expected = torch.arange(seq_len_audio, device=attention_mask.device).unsqueeze(0) < lengths.unsqueeze(1)
+                expected = torch.arange(seq_len_audio, device=attention_mask.device).unsqueeze(0) < lengths.unsqueeze(
+                    1
+                )
                 contiguous = torch.eq(attention_mask.bool(), expected).all(dim=1)
                 lengths = torch.where(
                     contiguous,
