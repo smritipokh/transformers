@@ -37,7 +37,11 @@ from ...modeling_outputs import (
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...utils import logging
-from ..moonshine.modeling_moonshine import MoonshineForConditionalGeneration, MoonshinePreTrainedModel
+from ..moonshine.modeling_moonshine import (
+    MoonshineAttention,
+    MoonshineForConditionalGeneration,
+    MoonshinePreTrainedModel,
+)
 from ..whisper.modeling_whisper import shift_tokens_right
 from .configuration_moonshine_streaming import MoonshineStreamingConfig
 
@@ -136,50 +140,6 @@ def make_sliding_window_mask(seq_len: int, n_past: int, n_future: int, device: t
     kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)
     return (kv_idx >= q_idx - n_past) & (kv_idx <= q_idx + n_future)
 
-
-def eager_attention_forward(
-    module: nn.Module,
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
-    attention_mask: Optional[Tensor],
-    dropout: float = 0.0,
-    scaling: Optional[float] = None,
-    is_causal: Optional[bool] = None,
-    **_kwargs,
-) -> tuple[Tensor, Tensor]:
-    if scaling is None:
-        scaling = module.scaling
-
-    attn_weights = torch.matmul(query, key.transpose(2, 3)) * scaling
-
-    if attention_mask is not None:
-        if attention_mask.dim() == 2:
-            attention_mask = _prepare_4d_attention_mask(
-                attention_mask, dtype=attn_weights.dtype, tgt_len=attn_weights.shape[-2]
-            )
-        elif attention_mask.dim() == 3:
-            attention_mask = attention_mask.unsqueeze(1)
-
-        if attention_mask.dtype == torch.bool:
-            attn_weights = attn_weights.masked_fill(~attention_mask, torch.finfo(attn_weights.dtype).min)
-        else:
-            attn_weights = attn_weights + attention_mask
-    elif is_causal:
-        q_len = attn_weights.shape[-2]
-        k_len = attn_weights.shape[-1]
-        causal_mask = torch.full((q_len, k_len), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-        causal_mask = torch.triu(causal_mask, diagonal=1)
-        attn_weights = attn_weights + causal_mask
-
-    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_weights = F.dropout(attn_weights, p=dropout, training=module.training)
-    attn_output = torch.matmul(attn_weights, value)
-    attn_output = attn_output.transpose(1, 2).contiguous()
-
-    return attn_output, attn_weights
-
-
 class MoonshineStreamingRotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -194,7 +154,14 @@ class MoonshineStreamingRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
         self.interpolation_factor = interpolation_factor
 
-    def forward(self, seq_len: Optional[int], device: torch.device, positions: Optional[Tensor] = None) -> Tensor:
+    def forward(
+        self,
+        seq_len: Optional[int],
+        device: torch.device,
+        positions: Optional[Tensor] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Returns (cos, sin) tuple for position embeddings with shape (1, seq_len, dim)."""
         if positions is None:
             if seq_len is None:
                 raise ValueError("seq_len must be provided when positions is None.")
@@ -203,22 +170,17 @@ class MoonshineStreamingRotaryEmbedding(nn.Module):
             positions = positions.to(device=device, dtype=self.inv_freq.dtype).view(-1)
 
         freqs = torch.einsum("i,j->ij", positions, self.inv_freq.to(device)) / self.interpolation_factor
-        return torch.stack((freqs, freqs), dim=-1).flatten(-2)
-
-
-def rotate_half(x: Tensor) -> Tensor:
-    x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
-    return torch.stack((-x2, x1), dim=-1).flatten(-2)
-
-
-def apply_rotary_pos_emb(x: Tensor, freqs: Tensor) -> Tensor:
-    rot_dim = freqs.shape[-1]
-    x_rot, x_pass = x[..., :rot_dim], x[..., rot_dim:]
-    freqs = freqs.unsqueeze(0).unsqueeze(0)
-    cos = freqs.cos().to(x.dtype)
-    sin = freqs.sin().to(x.dtype)
-    x_rot = x_rot * cos + rotate_half(x_rot) * sin
-    return torch.cat([x_rot, x_pass], dim=-1)
+        # Concatenate freqs to match expected format for apply_rotary_pos_emb
+        # apply_rotary_pos_emb will handle the interleaving internally
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+        # Return with batch dimension for broadcasting: (1, seq_len, dim)
+        # Cast to requested dtype if specified
+        if dtype is not None:
+            cos = cos.to(dtype=dtype)
+            sin = sin.to(dtype=dtype)
+        return cos.unsqueeze(0), sin.unsqueeze(0)
 
 
 class MoonshineStreamingLayerNorm(nn.Module):
@@ -271,283 +233,199 @@ class MoonshineStreamingFeedForward(nn.Module):
         return self.project_out(x)
 
 
-class MoonshineStreamingMultiHeadAttention(nn.Module):
+class MoonshineStreamingAttention(MoonshineAttention):
+    """Attention for MoonshineStreaming, inheriting from MoonshineAttention.
+
+    Adds support for explicit `dim` parameter to handle different encoder/decoder dimensions.
+    Also handles the case where position_embeddings is None (no rotary embeddings).
+    """
+
     def __init__(
         self,
         config: MoonshineStreamingConfig,
-        dim: int,
-        head_dim: int,
-        nheads: int,
-        dropout: float = 0.0,
-        bias: bool = False,
-        layer_idx: Optional[int] = None,
-        device=None,
-        dtype=None,
+        layer_idx: int,
+        is_causal: bool,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        dim: Optional[int] = None,
     ):
-        super().__init__()
-        self.config = config
-        self.nheads = nheads
-        self.head_dim = head_dim
-        self.scaling = head_dim**-0.5
-        self.attention_dropout = dropout
-        self.layer_idx = layer_idx
+        # If dim is specified and different from hidden_size, temporarily modify config
+        # so that projections use the correct dimension
+        original_hidden_size = config.hidden_size
+        if dim is not None and dim != original_hidden_size:
+            config.update({"hidden_size": dim})
 
-        embed_dim = head_dim * nheads
-        self.q_proj = nn.Linear(dim, embed_dim, bias=bias, device=device, dtype=dtype)
-        self.k_proj = nn.Linear(dim, embed_dim, bias=bias, device=device, dtype=dtype)
-        self.v_proj = nn.Linear(dim, embed_dim, bias=bias, device=device, dtype=dtype)
-        self.out_proj = nn.Linear(embed_dim, dim, bias=bias, device=device, dtype=dtype)
-
-    def forward(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        rotary_freqs: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor] = None,
-        is_causal: bool = False,
-        output_attentions: bool = False,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[Tensor] = None,
-        is_cross_attention: bool = False,
-    ) -> tuple[Tensor, Optional[Tensor]]:
-        batch_size, q_len, _ = q.shape
-
-        query = self.q_proj(q).unflatten(-1, (self.nheads, self.head_dim)).transpose(1, 2)
-        if past_key_values is not None and self.layer_idx is None:
-            raise ValueError("layer_idx must be set when using past_key_values.")
-
-        is_updated = False
-        if past_key_values is not None:
-            if isinstance(past_key_values, EncoderDecoderCache):
-                is_updated = past_key_values.is_updated.get(self.layer_idx)
-                if is_cross_attention:
-                    current_past_key_values = past_key_values.cross_attention_cache
-                else:
-                    current_past_key_values = past_key_values.self_attention_cache
-            else:
-                current_past_key_values = past_key_values
-        else:
-            current_past_key_values = None
-
-        if is_cross_attention and current_past_key_values is not None and is_updated:
-            key = current_past_key_values.layers[self.layer_idx].keys
-            value = current_past_key_values.layers[self.layer_idx].values
-        else:
-            key = self.k_proj(k).unflatten(-1, (self.nheads, self.head_dim)).transpose(1, 2)
-            value = self.v_proj(v).unflatten(-1, (self.nheads, self.head_dim)).transpose(1, 2)
-
-            if rotary_freqs is not None and not is_cross_attention:
-                k_len = key.shape[2]
-                key = apply_rotary_pos_emb(key, rotary_freqs[:k_len])
-
-            if current_past_key_values is not None:
-                cache_position = cache_position if not is_cross_attention else None
-                key, value = current_past_key_values.update(
-                    key, value, self.layer_idx, {"cache_position": cache_position}
-                )
-                if is_cross_attention and isinstance(past_key_values, EncoderDecoderCache):
-                    past_key_values.is_updated[self.layer_idx] = True
-
-        if rotary_freqs is not None:
-            query = apply_rotary_pos_emb(query, rotary_freqs[:q_len])
-
-        attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
-        if output_attentions and attn_implementation != "eager":
-            logger.warning_once(
-                "MoonshineStreaming attention does not support `output_attentions=True` with "
-                f"`attn_implementation={attn_implementation}`. Falling back to eager attention."
-            )
-            attn_implementation = "eager"
-
-        attention_interface = eager_attention_forward
-        if attn_implementation != "eager":
-            if attn_mask is not None and attn_mask.dim() > 2 and "flash_attention" in attn_implementation:
-                logger.warning_once(
-                    "Flash attention does not support 4D attention masks. Falling back to SDPA for MoonshineStreaming."
-                )
-                attn_implementation = "sdpa"
-            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_implementation]
-
-        attn_output, attn_weights = attention_interface(
-            self,
-            query,
-            key,
-            value,
-            attn_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
+        super().__init__(
+            config=config,
+            layer_idx=layer_idx,
             is_causal=is_causal,
-            output_attentions=output_attentions,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
         )
 
-        attn_output = attn_output.reshape(batch_size, q_len, -1).contiguous()
-        attn_output = self.out_proj(attn_output)
-        return attn_output, attn_weights
-
-
-class MoonshineStreamingSelfAttentionBlock(nn.Module):
-    def __init__(
-        self,
-        config: MoonshineStreamingConfig,
-        dim: int,
-        head_dim: int,
-        nheads: int,
-        use_swiglu: bool = True,
-        ff_mult: int = 4,
-        attn_dropout: float = 0.0,
-        ff_dropout: float = 0.1,
-        has_ff: bool = True,
-        layer_idx: Optional[int] = None,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__()
-        self.norm1 = MoonshineStreamingLayerNorm(dim, device=device, dtype=dtype)
-        self.attn = MoonshineStreamingMultiHeadAttention(
-            config,
-            dim,
-            head_dim,
-            nheads,
-            dropout=attn_dropout,
-            bias=config.attention_bias,
-            layer_idx=layer_idx,
-            device=device,
-            dtype=dtype,
-        )
-
-        self.has_ff = has_ff
-        if has_ff:
-            self.norm2 = MoonshineStreamingLayerNorm(dim, device=device, dtype=dtype)
-            self.ff = MoonshineStreamingFeedForward(
-                dim,
-                mult=ff_mult,
-                use_swiglu=use_swiglu,
-                dropout=ff_dropout,
-                device=device,
-                dtype=dtype,
-            )
+        # Restore original hidden_size
+        if dim is not None and dim != original_hidden_size:
+            config.update({"hidden_size": original_hidden_size})
 
     def forward(
         self,
-        x: Tensor,
-        rotary_freqs: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor] = None,
-        is_causal: bool = False,
-        output_attentions: bool = False,
+        hidden_states: Tensor,
+        position_embeddings: Optional[tuple[Tensor, Tensor]] = None,
+        attention_mask: Optional[Tensor] = None,
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[Tensor] = None,
+        key_value_states: Optional[Tensor] = None,
+        **kwargs,
     ) -> tuple[Tensor, Optional[Tensor]]:
-        normed = self.norm1(x)
-        attn_output, attn_weights = self.attn(
-            normed,
-            normed,
-            normed,
-            rotary_freqs,
-            attn_mask,
-            is_causal,
-            output_attentions=output_attentions,
+        # MoonshineStreaming encoder has rotary_dim=0 by default (no rotary embeddings).
+        # MoonshineAttention expects position_embeddings for self-attention, so we provide
+        # identity embeddings (cos=1, sin=0) which result in no rotation being applied.
+        # The overhead is negligible: O(seq_len * head_dim) vs O(seq_len^2 * head_dim) for attention.
+        if position_embeddings is None and key_value_states is None:
+            seq_len = hidden_states.shape[1]
+            device = hidden_states.device
+            dtype = hidden_states.dtype
+            # Shape (1, seq_len, head_dim) to match MoonshineStreamingRotaryEmbedding output format
+            dummy_cos = torch.ones(1, seq_len, self.head_dim, device=device, dtype=dtype)
+            dummy_sin = torch.zeros(1, seq_len, self.head_dim, device=device, dtype=dtype)
+            position_embeddings = (dummy_cos, dummy_sin)
+
+        return super().forward(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
             past_key_values=past_key_values,
             cache_position=cache_position,
+            key_value_states=key_value_states,
+            **kwargs,
         )
-        x = x + attn_output
-        if self.has_ff:
-            x = x + self.ff(self.norm2(x))
-        return x, attn_weights
-
-
-class MoonshineStreamingCrossAttentionBlock(nn.Module):
-    def __init__(
-        self,
-        config: MoonshineStreamingConfig,
-        dim: int,
-        head_dim: int,
-        nheads: int,
-        use_swiglu: bool = True,
-        ff_mult: int = 4,
-        attn_dropout: float = 0.0,
-        ff_dropout: float = 0.1,
-        layer_idx: Optional[int] = None,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__()
-        self.norm_q = MoonshineStreamingLayerNorm(dim, device=device, dtype=dtype)
-        self.attn = MoonshineStreamingMultiHeadAttention(
-            config,
-            dim,
-            head_dim,
-            nheads,
-            dropout=attn_dropout,
-            bias=config.attention_bias,
-            layer_idx=layer_idx,
-            device=device,
-            dtype=dtype,
-        )
-        self.norm2 = MoonshineStreamingLayerNorm(dim, device=device, dtype=dtype)
-        self.ff = MoonshineStreamingFeedForward(
-            dim,
-            mult=ff_mult,
-            use_swiglu=use_swiglu,
-            dropout=ff_dropout,
-            device=device,
-            dtype=dtype,
-        )
-
-    def forward(
-        self,
-        x: Tensor,
-        context: Tensor,
-        cross_attn_mask: Optional[Tensor] = None,
-        output_attentions: bool = False,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[Tensor] = None,
-    ) -> tuple[Tensor, Optional[Tensor]]:
-        normed_q = self.norm_q(x)
-        attn_output, attn_weights = self.attn(
-            normed_q,
-            context,
-            context,
-            attn_mask=cross_attn_mask,
-            output_attentions=output_attentions,
-            past_key_values=past_key_values,
-            cache_position=cache_position,
-            is_cross_attention=True,
-        )
-        x = x + attn_output
-        x = x + self.ff(self.norm2(x))
-        return x, attn_weights
 
 
 class MoonshineStreamingEncoderLayer(nn.Module):
+    """Encoder layer with flat structure matching Moonshine convention."""
+
     def __init__(self, config: MoonshineStreamingConfig, layer_idx: int):
         super().__init__()
-        self.block = MoonshineStreamingSelfAttentionBlock(
-            config,
-            dim=config.encoder_dim,
-            head_dim=config.head_dim,
-            nheads=config.encoder_num_attention_heads,
-            use_swiglu=config.use_swiglu_encoder,
-            ff_mult=config.ffn_mult,
-            attn_dropout=config.attn_dropout,
-            ff_dropout=config.ff_dropout,
-            has_ff=True,
+        self.config = config
+
+        self.self_attn = MoonshineStreamingAttention(
+            config=config,
             layer_idx=layer_idx,
+            is_causal=False,
+            num_attention_heads=config.encoder_num_attention_heads,
+            num_key_value_heads=config.encoder_num_attention_heads,
+            dim=config.encoder_dim,
         )
+        self.mlp = MoonshineStreamingFeedForward(
+            config.encoder_dim,
+            mult=config.ffn_mult,
+            use_swiglu=config.use_swiglu_encoder,
+            dropout=config.ff_dropout,
+        )
+        self.input_layernorm = MoonshineStreamingLayerNorm(config.encoder_dim)
+        self.post_attention_layernorm = MoonshineStreamingLayerNorm(config.encoder_dim)
 
     def forward(
         self,
-        x: Tensor,
-        rotary_freqs: Optional[Tensor] = None,
-        attn_mask: Optional[Tensor] = None,
+        hidden_states: Tensor,
+        position_embeddings: Optional[tuple[Tensor, Tensor]] = None,
+        attention_mask: Optional[Tensor] = None,
         output_attentions: bool = False,
     ) -> tuple[Tensor, Optional[Tensor]]:
-        return self.block(
-            x,
-            rotary_freqs=rotary_freqs,
-            attn_mask=attn_mask,
-            output_attentions=output_attentions,
+        # Self attention
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, attn_weights = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
         )
+        hidden_states = residual + hidden_states
+
+        # Feed forward
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states, attn_weights
+
+
+class MoonshineStreamingDecoderLayer(nn.Module):
+    """Decoder layer with flat structure matching Moonshine convention."""
+
+    def __init__(self, config: MoonshineStreamingConfig, layer_idx: int):
+        super().__init__()
+        self.config = config
+
+        self.self_attn = MoonshineStreamingAttention(
+            config=config,
+            layer_idx=layer_idx,
+            is_causal=True,
+            num_attention_heads=config.decoder_num_attention_heads,
+            num_key_value_heads=config.decoder_num_attention_heads,
+            dim=config.decoder_dim,
+        )
+        self.encoder_attn = MoonshineStreamingAttention(
+            config=config,
+            layer_idx=layer_idx,
+            is_causal=False,
+            num_attention_heads=config.decoder_num_attention_heads,
+            num_key_value_heads=config.decoder_num_attention_heads,
+            dim=config.decoder_dim,
+        )
+        self.mlp = MoonshineStreamingFeedForward(
+            config.decoder_dim,
+            mult=config.ffn_mult,
+            use_swiglu=config.use_swiglu_decoder,
+            dropout=config.ff_dropout,
+        )
+        self.input_layernorm = MoonshineStreamingLayerNorm(config.decoder_dim)
+        self.post_attention_layernorm = MoonshineStreamingLayerNorm(config.decoder_dim)
+        self.final_layernorm = MoonshineStreamingLayerNorm(config.decoder_dim)
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        encoder_hidden_states: Tensor,
+        encoder_attention_mask: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
+        position_embeddings: Optional[tuple[Tensor, Tensor]] = None,
+        output_attentions: bool = False,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[Tensor] = None,
+    ) -> tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
+        # Self attention
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, self_attn_weights = self.self_attn(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+        )
+        hidden_states = residual + hidden_states
+
+        # Cross attention with pre-norm on query only (matching original norm_q)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, cross_attn_weights = self.encoder_attn(
+            hidden_states=hidden_states,
+            key_value_states=encoder_hidden_states,
+            attention_mask=encoder_attention_mask,
+            past_key_values=past_key_values,
+            cache_position=cache_position,
+        )
+        hidden_states = residual + hidden_states
+
+        # Feed forward
+        residual = hidden_states
+        hidden_states = self.final_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+
+        return hidden_states, self_attn_weights, cross_attn_weights
 
 
 class MoonshineStreamingEncoder(nn.Module):
@@ -690,7 +568,7 @@ class MoonshineStreamingEncoder(nn.Module):
 
             x, mask, _ = self._preprocess(input_values, lengths)
             # Cast to encoder dtype
-            encoder_dtype = self.layers[0].block.attn.q_proj.weight.dtype
+            encoder_dtype = self.layers[0].self_attn.q_proj.weight.dtype
             if x.dtype != encoder_dtype:
                 x = x.to(dtype=encoder_dtype)
         else:
@@ -703,9 +581,9 @@ class MoonshineStreamingEncoder(nn.Module):
         hidden_states = (x,) if output_hidden_states else None
         all_attentions = () if output_attentions else None
 
-        rotary_freqs = None
+        position_embeddings = None
         if self.rotary is not None:
-            rotary_freqs = self.rotary(seq_len, x.device)
+            position_embeddings = self.rotary(seq_len, x.device, dtype=x.dtype)
 
         attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
         if output_attentions and attn_implementation != "eager":
@@ -740,8 +618,8 @@ class MoonshineStreamingEncoder(nn.Module):
 
             x, attn_weights = layer(
                 x,
-                rotary_freqs=rotary_freqs,
-                attn_mask=attn_mask,
+                position_embeddings=position_embeddings,
+                attention_mask=attn_mask,
                 output_attentions=output_attentions,
             )
             if output_hidden_states:
@@ -801,64 +679,6 @@ class MoonshineStreamingContextAdapter(nn.Module):
         return self.proj(x)
 
 
-class MoonshineStreamingDecoderLayer(nn.Module):
-    def __init__(self, config: MoonshineStreamingConfig, layer_idx: int):
-        super().__init__()
-        self.self_attn = MoonshineStreamingSelfAttentionBlock(
-            config,
-            dim=config.decoder_dim,
-            head_dim=config.head_dim,
-            nheads=config.decoder_num_attention_heads,
-            use_swiglu=config.use_swiglu_decoder,
-            ff_mult=config.ffn_mult,
-            attn_dropout=config.attn_dropout,
-            ff_dropout=config.ff_dropout,
-            has_ff=False,
-            layer_idx=layer_idx,
-        )
-        self.cross_attn = MoonshineStreamingCrossAttentionBlock(
-            config,
-            dim=config.decoder_dim,
-            head_dim=config.head_dim,
-            nheads=config.decoder_num_attention_heads,
-            use_swiglu=config.use_swiglu_decoder,
-            ff_mult=config.ffn_mult,
-            attn_dropout=config.attn_dropout,
-            ff_dropout=config.ff_dropout,
-            layer_idx=layer_idx,
-        )
-
-    def forward(
-        self,
-        x: Tensor,
-        context: Tensor,
-        cross_attn_mask: Optional[Tensor] = None,
-        rotary_freqs: Optional[Tensor] = None,
-        self_attn_mask: Optional[Tensor] = None,
-        output_attentions: bool = False,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[Tensor] = None,
-    ) -> tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
-        x, self_attn_weights = self.self_attn(
-            x,
-            rotary_freqs=rotary_freqs,
-            attn_mask=self_attn_mask,
-            is_causal=True,
-            output_attentions=output_attentions,
-            past_key_values=past_key_values,
-            cache_position=cache_position,
-        )
-        x, cross_attn_weights = self.cross_attn(
-            x,
-            context,
-            cross_attn_mask=cross_attn_mask,
-            output_attentions=output_attentions,
-            past_key_values=past_key_values,
-            cache_position=cache_position,
-        )
-        return x, self_attn_weights, cross_attn_weights
-
-
 class MoonshineStreamingDecoder(nn.Module):
     def __init__(self, config: MoonshineStreamingConfig):
         super().__init__()
@@ -892,7 +712,7 @@ class MoonshineStreamingDecoder(nn.Module):
         inputs_embeds: Optional[Tensor] = None,
         encoder_hidden_states: Optional[Tensor] = None,
         encoder_attention_mask: Optional[Tensor] = None,
-        decoder_attention_mask: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[Tensor] = None,
@@ -919,21 +739,23 @@ class MoonshineStreamingDecoder(nn.Module):
             cache_position = torch.arange(
                 past_key_values_length, past_key_values_length + seq_len, device=inputs_embeds.device
             )
-        if decoder_attention_mask is not None and decoder_attention_mask.dim() == 2:
+        if attention_mask is not None and attention_mask.dim() == 2:
             expected_len = past_key_values_length + seq_len
-            if decoder_attention_mask.shape[-1] != expected_len:
-                if decoder_attention_mask.shape[-1] > expected_len:
-                    decoder_attention_mask = decoder_attention_mask[:, -expected_len:]
+            if attention_mask.shape[-1] != expected_len:
+                if attention_mask.shape[-1] > expected_len:
+                    attention_mask = attention_mask[:, -expected_len:]
                 else:
-                    decoder_attention_mask = F.pad(
-                        decoder_attention_mask,
-                        (expected_len - decoder_attention_mask.shape[-1], 0),
+                    attention_mask = F.pad(
+                        attention_mask,
+                        (expected_len - attention_mask.shape[-1], 0),
                         value=1,
                     )
 
-        rotary_freqs = None
+        position_embeddings = None
         if self.rotary is not None:
-            rotary_freqs = self.rotary(seq_len, inputs_embeds.device, positions=cache_position)
+            position_embeddings = self.rotary(
+                seq_len, inputs_embeds.device, positions=cache_position, dtype=inputs_embeds.dtype
+            )
 
         attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
         if output_attentions and attn_implementation != "eager":
@@ -945,18 +767,18 @@ class MoonshineStreamingDecoder(nn.Module):
 
         self_attn_mask = None
         if "flash_attention" in attn_implementation:
-            if decoder_attention_mask is not None and (decoder_attention_mask == 0).any():
-                self_attn_mask = decoder_attention_mask
+            if attention_mask is not None and (attention_mask == 0).any():
+                self_attn_mask = attention_mask
         elif attn_implementation == "sdpa":
             self_attn_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                decoder_attention_mask,
+                attention_mask,
                 inputs_embeds.shape[:-1],
                 inputs_embeds,
                 past_key_values_length=past_key_values_length,
             )
         else:
             self_attn_mask = _prepare_4d_causal_attention_mask(
-                decoder_attention_mask,
+                attention_mask,
                 inputs_embeds.shape[:-1],
                 inputs_embeds,
                 past_key_values_length=past_key_values_length,
@@ -983,9 +805,9 @@ class MoonshineStreamingDecoder(nn.Module):
             x, self_attn_weights, cross_attn_weights = layer(
                 x,
                 encoder_hidden_states,
-                cross_attn_mask=cross_attn_mask,
-                rotary_freqs=rotary_freqs,
-                self_attn_mask=self_attn_mask,
+                encoder_attention_mask=cross_attn_mask,
+                attention_mask=self_attn_mask,
+                position_embeddings=position_embeddings,
                 output_attentions=output_attentions,
                 past_key_values=past_key_values,
                 cache_position=cache_position,
@@ -1148,7 +970,7 @@ class MoonshineStreamingModel(MoonshineStreamingPreTrainedModel):
             inputs_embeds=decoder_inputs_embeds,
             encoder_hidden_states=adapted_states,
             encoder_attention_mask=encoder_attention_mask,
-            decoder_attention_mask=decoder_attention_mask,
+            attention_mask=decoder_attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
             cache_position=cache_position,

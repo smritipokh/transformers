@@ -114,6 +114,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         "hidden_size": "decoder_dim",
         "num_attention_heads": "decoder_num_attention_heads",
         "num_hidden_layers": "decoder_num_hidden_layers",
+        "attention_dropout": "attn_dropout",
     }
 
     def __init__(
@@ -154,6 +155,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         num_tokens_per_sec: float = 6.5,
         attn_backend: str = "auto",
         attention_bias: bool = False,
+        pad_head_dim_to_multiple_of: Optional[int] = None,
         use_cache: bool = True,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -222,6 +224,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         self.num_tokens_per_sec = num_tokens_per_sec
         self.attn_backend = attn_backend
         self.attention_bias = attention_bias
+        self.pad_head_dim_to_multiple_of = pad_head_dim_to_multiple_of
         self.use_cache = use_cache
 
         kwargs.setdefault("is_encoder_decoder", True)
