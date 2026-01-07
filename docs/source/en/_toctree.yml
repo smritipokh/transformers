@@ -919,6 +919,8 @@
         title: MMS
       - local: model_doc/moonshine
         title: Moonshine
+      - local: model_doc/moonshine_streaming
+        title: Moonshine Streaming
       - local: model_doc/moshi
         title: Moshi
       - local: model_doc/musicgen
