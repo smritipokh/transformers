@@ -91,121 +91,6 @@ class MoonshineStreamingCausalConv1d(nn.Module):
         return self.conv(x)
 
 
-def make_frame_mask(lengths_samples: torch.Tensor, frame_len: int) -> tuple[torch.Tensor, torch.Tensor]:
-    n_frames = lengths_samples // frame_len
-    max_frames = n_frames.max()
-    idx = torch.arange(max_frames, device=lengths_samples.device).unsqueeze(0)
-    frame_mask = idx < n_frames.unsqueeze(1)
-    return frame_mask, n_frames
-
-
-def downsample_mask_causal(mask: torch.Tensor, kernel: int, stride: int, dilation: int = 1) -> torch.Tensor:
-    m = mask.float().unsqueeze(1)
-    left_pad = (kernel - 1) * dilation
-    m_pad = F.pad(m, (left_pad, 0))
-    weight = torch.ones(1, 1, kernel, device=mask.device)
-    m_conv = F.conv1d(m_pad, weight, stride=stride, dilation=dilation)
-    return (m_conv > 0).squeeze(1)
-
-
-def frame_nonoverlap_drop_tail(
-    wav: torch.Tensor, lengths: torch.Tensor, frame_len: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    batch_size, max_length = wav.shape
-    lengths = lengths.clamp(max=max_length)
-    frame_mask, n_frames = make_frame_mask(lengths, frame_len)
-    max_frames = frame_mask.size(1)
-
-    frames = wav.new_zeros(batch_size, max_frames, frame_len)
-    for idx in range(batch_size):
-        frame_count = int(n_frames[idx].item())
-        if frame_count > 0:
-            trunc = frame_count * frame_len
-            frames[idx, :frame_count] = wav[idx, :trunc].reshape(frame_count, frame_len)
-    return frames, frame_mask, n_frames
-
-
-def bernoulli_replace_with_gaussian(
-    values: torch.Tensor, valid_mask: torch.Tensor, p: float, sigma: float
-) -> torch.Tensor:
-    batch_size, seq_len, _ = values.shape
-    flips = (torch.rand(batch_size, seq_len, device=values.device) < p) & valid_mask
-    noise = torch.randn_like(values) * sigma
-    replace_mask = flips.unsqueeze(-1)
-    return torch.where(replace_mask, noise, values)
-
-
-class MoonshineStreamingAudioPreprocessor(nn.Module):
-    def __init__(self, config: MoonshineStreamingConfig):
-        super().__init__()
-        self.frame_len = int(round(config.sample_rate * config.frame_ms / 1000.0))
-        self.input_dropout_p = config.preprocessor_input_dropout_p
-        self.input_dropout_sigma = config.preprocessor_input_dropout_sigma
-
-        self.cmvn = MoonshineStreamingFrameCMVN()
-        self.comp = MoonshineStreamingAsinhCompress(k_init=config.preprocessor_asinh_k_init)
-        self.lin = nn.Linear(self.frame_len, config.encoder_dim, bias=False)
-        self.act = nn.SiLU()
-
-        self.conv1 = MoonshineStreamingCausalConv1d(
-            config.encoder_dim,
-            config.preprocessor_c1,
-            kernel=config.preprocessor_k1,
-            stride=2,
-            bias=True,
-        )
-        self.conv2 = MoonshineStreamingCausalConv1d(
-            config.preprocessor_c1,
-            config.preprocessor_c2,
-            kernel=config.preprocessor_k2,
-            stride=2,
-            bias=True,
-        )
-
-        self.k1 = config.preprocessor_k1
-        self.k2 = config.preprocessor_k2
-
-    def forward(
-        self, wav: torch.Tensor, lengths_samples: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_size, max_length = wav.shape
-        if lengths_samples is None:
-            lengths_samples = torch.full((batch_size,), max_length, dtype=torch.long, device=wav.device)
-
-        frames, frame_mask, _ = frame_nonoverlap_drop_tail(wav, lengths_samples, self.frame_len)
-
-        if frames.numel() == 0:
-            channels_out = self.conv2.conv.weight.shape[0]
-            empty = torch.zeros(batch_size, 0, channels_out, device=wav.device)
-            empty_mask = torch.zeros(batch_size, 0, dtype=torch.bool, device=wav.device)
-            empty_lengths = torch.zeros(batch_size, dtype=torch.long, device=wav.device)
-            return empty, empty_mask, empty_lengths
-
-        x = self.cmvn(frames)
-        if self.training and self.input_dropout_p > 0:
-            x = bernoulli_replace_with_gaussian(x, frame_mask, self.input_dropout_p, self.input_dropout_sigma)
-
-        x = self.comp(x)
-        # Cast to model dtype before linear layers (important for fp16/bf16 inference)
-        x = x.to(dtype=self.lin.weight.dtype)
-        x = self.lin(x)
-        x = self.act(x)
-        x = x * frame_mask.unsqueeze(-1)
-
-        x = x.transpose(1, 2).contiguous()
-        mask1 = downsample_mask_causal(frame_mask, kernel=self.k1, stride=2)
-        x = self.conv1(x)
-        x = self.act(x) * mask1.unsqueeze(1)
-
-        mask2 = downsample_mask_causal(mask1, kernel=self.k2, stride=2)
-        x = self.conv2(x)
-        x = x * mask2.unsqueeze(1)
-
-        feats = x.transpose(1, 2).contiguous()
-        out_lengths = mask2.sum(dim=1)
-        return feats, mask2, out_lengths
-
-
 class MoonshineStreamingRotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -421,7 +306,7 @@ class MoonshineStreamingMultiHeadAttention(nn.Module):
         if rotary_freqs is not None:
             query = apply_rotary_pos_emb(query, rotary_freqs[:q_len])
 
-        attn_implementation = self.config._attn_implementation
+        attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
         if output_attentions and attn_implementation != "eager":
             logger.warning_once(
                 "MoonshineStreaming attention does not support `output_attentions=True` with "
@@ -619,6 +504,50 @@ class MoonshineStreamingEncoderLayer(nn.Module):
         )
 
 
+def make_frame_mask(lengths_samples: torch.Tensor, frame_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+    n_frames = lengths_samples // frame_len
+    max_frames = n_frames.max()
+    idx = torch.arange(max_frames, device=lengths_samples.device).unsqueeze(0)
+    frame_mask = idx < n_frames.unsqueeze(1)
+    return frame_mask, n_frames
+
+
+def downsample_mask_causal(mask: torch.Tensor, kernel: int, stride: int, dilation: int = 1) -> torch.Tensor:
+    m = mask.float().unsqueeze(1)
+    left_pad = (kernel - 1) * dilation
+    m_pad = F.pad(m, (left_pad, 0))
+    weight = torch.ones(1, 1, kernel, device=mask.device)
+    m_conv = F.conv1d(m_pad, weight, stride=stride, dilation=dilation)
+    return (m_conv > 0).squeeze(1)
+
+
+def frame_nonoverlap_drop_tail(
+    wav: torch.Tensor, lengths: torch.Tensor, frame_len: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, max_length = wav.shape
+    lengths = lengths.clamp(max=max_length)
+    frame_mask, n_frames = make_frame_mask(lengths, frame_len)
+    max_frames = frame_mask.size(1)
+
+    frames = wav.new_zeros(batch_size, max_frames, frame_len)
+    for idx in range(batch_size):
+        frame_count = int(n_frames[idx].item())
+        if frame_count > 0:
+            trunc = frame_count * frame_len
+            frames[idx, :frame_count] = wav[idx, :trunc].reshape(frame_count, frame_len)
+    return frames, frame_mask, n_frames
+
+
+def bernoulli_replace_with_gaussian(
+    values: torch.Tensor, valid_mask: torch.Tensor, p: float, sigma: float
+) -> torch.Tensor:
+    batch_size, seq_len, _ = values.shape
+    flips = (torch.rand(batch_size, seq_len, device=values.device) < p) & valid_mask
+    noise = torch.randn_like(values) * sigma
+    replace_mask = flips.unsqueeze(-1)
+    return torch.where(replace_mask, noise, values)
+
+
 def make_sliding_window_mask(seq_len: int, n_past: int, n_future: int, device: torch.device) -> Tensor:
     q_idx = torch.arange(seq_len, device=device).unsqueeze(1)
     kv_idx = torch.arange(seq_len, device=device).unsqueeze(0)
@@ -632,6 +561,35 @@ class MoonshineStreamingEncoder(nn.Module):
         self.dim = config.encoder_dim
         self.rotary_dim = config.encoder_rotary_dim
 
+        # Audio preprocessing layers (previously in MoonshineStreamingAudioPreprocessor)
+        self.frame_len = int(round(config.sample_rate * config.frame_ms / 1000.0))
+        self.input_dropout_p = config.preprocessor_input_dropout_p
+        self.input_dropout_sigma = config.preprocessor_input_dropout_sigma
+
+        self.cmvn = MoonshineStreamingFrameCMVN()
+        self.comp = MoonshineStreamingAsinhCompress(k_init=config.preprocessor_asinh_k_init)
+        self.lin = nn.Linear(self.frame_len, config.encoder_dim, bias=False)
+        self.act = nn.SiLU()
+
+        self.conv1 = MoonshineStreamingCausalConv1d(
+            config.encoder_dim,
+            config.preprocessor_c1,
+            kernel=config.preprocessor_k1,
+            stride=2,
+            bias=True,
+        )
+        self.conv2 = MoonshineStreamingCausalConv1d(
+            config.preprocessor_c1,
+            config.preprocessor_c2,
+            kernel=config.preprocessor_k2,
+            stride=2,
+            bias=True,
+        )
+
+        self.k1 = config.preprocessor_k1
+        self.k2 = config.preprocessor_k2
+
+        # Encoder layers
         if config.encoder_window is None:
             self.windows = [None] * config.encoder_num_hidden_layers
         elif isinstance(config.encoder_window, list):
@@ -657,22 +615,95 @@ class MoonshineStreamingEncoder(nn.Module):
 
         self.final_norm = MoonshineStreamingLayerNorm(self.dim)
 
+    def _preprocess(
+        self, wav: torch.Tensor, lengths_samples: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Preprocess raw audio waveform into features for the encoder."""
+        batch_size, max_length = wav.shape
+        if lengths_samples is None:
+            lengths_samples = torch.full((batch_size,), max_length, dtype=torch.long, device=wav.device)
+
+        frames, frame_mask, _ = frame_nonoverlap_drop_tail(wav, lengths_samples, self.frame_len)
+
+        if frames.numel() == 0:
+            channels_out = self.conv2.conv.weight.shape[0]
+            empty = torch.zeros(batch_size, 0, channels_out, device=wav.device)
+            empty_mask = torch.zeros(batch_size, 0, dtype=torch.bool, device=wav.device)
+            empty_lengths = torch.zeros(batch_size, dtype=torch.long, device=wav.device)
+            return empty, empty_mask, empty_lengths
+
+        x = self.cmvn(frames)
+        if self.training and self.input_dropout_p > 0:
+            x = bernoulli_replace_with_gaussian(x, frame_mask, self.input_dropout_p, self.input_dropout_sigma)
+
+        x = self.comp(x)
+        # Cast to model dtype before linear layers (important for fp16/bf16 inference)
+        x = x.to(dtype=self.lin.weight.dtype)
+        x = self.lin(x)
+        x = self.act(x)
+        x = x * frame_mask.unsqueeze(-1)
+
+        x = x.transpose(1, 2).contiguous()
+        mask1 = downsample_mask_causal(frame_mask, kernel=self.k1, stride=2)
+        x = self.conv1(x)
+        x = self.act(x) * mask1.unsqueeze(1)
+
+        mask2 = downsample_mask_causal(mask1, kernel=self.k2, stride=2)
+        x = self.conv2(x)
+        x = x * mask2.unsqueeze(1)
+
+        feats = x.transpose(1, 2).contiguous()
+        out_lengths = mask2.sum(dim=1)
+        return feats, mask2, out_lengths
+
     def forward(
         self,
         input_values: Tensor,
         attention_mask: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-        lengths: Optional[Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False,
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[BaseModelOutput, tuple[Tensor, Optional[tuple[Tensor, ...]], Optional[tuple[Tensor, ...]]]]:
         del kwargs
-        x = input_values
-        if mask is None and attention_mask is not None:
+
+        # Determine if input is raw audio (2D) or already preprocessed features (3D)
+        if input_values.dim() == 2:
+            # Raw audio input: (batch_size, audio_length)
+            if input_values.dtype != torch.float32:
+                input_values = input_values.to(dtype=torch.float32)
+
+            if attention_mask is None:
+                lengths = torch.full(
+                    (input_values.shape[0],),
+                    input_values.shape[-1],
+                    dtype=torch.long,
+                    device=input_values.device,
+                )
+            else:
+                attention_mask = attention_mask.to(dtype=torch.long)
+                lengths = attention_mask.sum(-1)
+                seq_len_audio = attention_mask.shape[-1]
+                expected = torch.arange(seq_len_audio, device=attention_mask.device).unsqueeze(0) < lengths.unsqueeze(
+                    1
+                )
+                contiguous = torch.eq(attention_mask.bool(), expected).all(dim=1)
+                lengths = torch.where(
+                    contiguous,
+                    lengths,
+                    torch.full_like(lengths, seq_len_audio),
+                )
+
+            x, mask, _ = self._preprocess(input_values, lengths)
+            # Cast to encoder dtype
+            encoder_dtype = self.layers[0].block.attn.q_proj.weight.dtype
+            if x.dtype != encoder_dtype:
+                x = x.to(dtype=encoder_dtype)
+        else:
+            # Already preprocessed features: (batch_size, seq_len, encoder_dim)
+            x = input_values
             mask = attention_mask
-        del lengths
+
         _, seq_len, _ = x.shape
 
         hidden_states = (x,) if output_hidden_states else None
@@ -682,7 +713,7 @@ class MoonshineStreamingEncoder(nn.Module):
         if self.rotary is not None:
             rotary_freqs = self.rotary(seq_len, x.device)
 
-        attn_implementation = self.config._attn_implementation
+        attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
         if output_attentions and attn_implementation != "eager":
             logger.warning_once(
                 "MoonshineStreaming attention does not support `output_attentions=True` with "
@@ -910,7 +941,7 @@ class MoonshineStreamingDecoder(nn.Module):
         if self.rotary is not None:
             rotary_freqs = self.rotary(seq_len, inputs_embeds.device, positions=cache_position)
 
-        attn_implementation = self.config._attn_implementation
+        attn_implementation = getattr(self.config, "_attn_implementation", None) or "eager"
         if output_attentions and attn_implementation != "eager":
             logger.warning_once(
                 "MoonshineStreaming attention does not support `output_attentions=True` with "
@@ -1035,7 +1066,6 @@ class MoonshineStreamingModel(MoonshineStreamingPreTrainedModel):
 
     def __init__(self, config: MoonshineStreamingConfig):
         super().__init__(config)
-        self.preprocessor = MoonshineStreamingAudioPreprocessor(config)
         self.encoder = MoonshineStreamingEncoder(config)
         self.adapter = MoonshineStreamingContextAdapter(config)
         self.decoder = MoonshineStreamingDecoder(config)
@@ -1073,39 +1103,21 @@ class MoonshineStreamingModel(MoonshineStreamingPreTrainedModel):
         if encoder_outputs is None:
             if input_values is None:
                 raise ValueError("input_values must be provided when encoder_outputs is None")
-            if input_values.dtype != torch.float32:
-                input_values = input_values.to(dtype=torch.float32)
-
-            if attention_mask is None:
-                lengths = torch.full(
-                    (input_values.shape[0],),
-                    input_values.shape[-1],
-                    dtype=torch.long,
-                    device=input_values.device,
-                )
-            else:
-                attention_mask = attention_mask.to(dtype=torch.long)
-                lengths = attention_mask.sum(-1)
-                seq_len = attention_mask.shape[-1]
-                expected = torch.arange(seq_len, device=attention_mask.device).unsqueeze(0) < lengths.unsqueeze(1)
-                contiguous = torch.eq(attention_mask.bool(), expected).all(dim=1)
-                lengths = torch.where(
-                    contiguous,
-                    lengths,
-                    torch.full_like(lengths, seq_len),
-                )
-
-            features, encoder_attention_mask, encoder_lengths = self.preprocessor(input_values, lengths)
-            encoder_dtype = next(self.encoder.parameters()).dtype
-            if features.dtype != encoder_dtype:
-                features = features.to(dtype=encoder_dtype)
+            # Pass raw audio directly to encoder (preprocessing is now handled internally)
             encoder_outputs = self.encoder(
-                features,
-                mask=encoder_attention_mask,
-                lengths=encoder_lengths,
+                input_values,
+                attention_mask=attention_mask,
                 output_hidden_states=output_hidden_states,
                 output_attentions=output_attentions,
             )
+            # Get encoder attention mask from encoder's preprocessing
+            if attention_mask is not None:
+                lengths = attention_mask.sum(-1).to(dtype=torch.long)
+                encoder_lengths = self._get_feat_extract_output_lengths(lengths)
+                seq_len = encoder_outputs.last_hidden_state.shape[1]
+                encoder_attention_mask = torch.arange(
+                    seq_len, device=encoder_outputs.last_hidden_state.device
+                ) < encoder_lengths.unsqueeze(1)
         else:
             if not isinstance(encoder_outputs, BaseModelOutput):
                 encoder_outputs = BaseModelOutput(
@@ -1253,40 +1265,26 @@ class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedMod
         del model_input_name
         attention_mask = model_kwargs.get("attention_mask", None)
 
-        if inputs_tensor.dtype != torch.float32:
-            inputs_tensor = inputs_tensor.to(dtype=torch.float32)
-
-        if attention_mask is None:
-            lengths = torch.full(
-                (inputs_tensor.shape[0],),
-                inputs_tensor.shape[-1],
-                dtype=torch.long,
-                device=inputs_tensor.device,
-            )
-        else:
-            attention_mask = attention_mask.to(dtype=torch.long)
-            lengths = attention_mask.sum(-1)
-            seq_len = attention_mask.shape[-1]
-            expected = torch.arange(seq_len, device=attention_mask.device).unsqueeze(0) < lengths.unsqueeze(1)
-            contiguous = torch.eq(attention_mask.bool(), expected).all(dim=1)
-            lengths = torch.where(
-                contiguous,
-                lengths,
-                torch.full_like(lengths, seq_len),
-            )
-
-        features, encoder_attention_mask, encoder_lengths = self.model.preprocessor(inputs_tensor, lengths)
-        encoder_dtype = next(self.model.encoder.parameters()).dtype
-        if features.dtype != encoder_dtype:
-            features = features.to(dtype=encoder_dtype)
+        # Pass raw audio directly to encoder (preprocessing is now handled internally)
         encoder_outputs = self.model.encoder(
-            input_values=features,
-            attention_mask=encoder_attention_mask,
-            lengths=encoder_lengths,
+            input_values=inputs_tensor,
+            attention_mask=attention_mask,
             output_attentions=generation_config.output_attentions,
             output_hidden_states=generation_config.output_hidden_states,
             return_dict=True,
         )
+
+        # Compute encoder attention mask from input lengths
+        if attention_mask is not None:
+            lengths = attention_mask.sum(-1).to(dtype=torch.long)
+            encoder_lengths = self._get_feat_extract_output_lengths(lengths)
+            seq_len = encoder_outputs.last_hidden_state.shape[1]
+            encoder_attention_mask = torch.arange(
+                seq_len, device=encoder_outputs.last_hidden_state.device
+            ) < encoder_lengths.unsqueeze(1)
+        else:
+            encoder_attention_mask = None
+
         model_kwargs["encoder_outputs"] = encoder_outputs
         model_kwargs["encoder_attention_mask"] = encoder_attention_mask
         model_kwargs["attention_mask"] = encoder_attention_mask
