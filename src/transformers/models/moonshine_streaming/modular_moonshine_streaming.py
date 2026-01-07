@@ -37,6 +37,7 @@ from ...modeling_outputs import (
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...utils import logging
+from ..moonshine.modeling_moonshine import MoonshineForConditionalGeneration, MoonshinePreTrainedModel
 from ..whisper.modeling_whisper import shift_tokens_right
 from .configuration_moonshine_streaming import MoonshineStreamingConfig
 
@@ -1007,15 +1008,16 @@ class MoonshineStreamingDecoder(nn.Module):
         )
 
 
-class MoonshineStreamingPreTrainedModel(PreTrainedModel):
+class MoonshineStreamingPreTrainedModel(MoonshinePreTrainedModel):
     config_class = MoonshineStreamingConfig
-    base_model_prefix = "model"
-    main_input_name = "input_values"
-    input_modalities = "audio"
-    _supports_flash_attn = True
-    _supports_sdpa = True
+    supports_gradient_checkpointing = False
+    _no_split_modules = ["MoonshineStreamingEncoderLayer", "MoonshineStreamingDecoderLayer"]
 
     def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor) -> torch.LongTensor:
+        """
+        Computes the output length of the convolutional layers for MoonshineStreaming.
+        Different from Moonshine due to frame-based preprocessing with causal convolutions.
+        """
         frame_len = int(round(self.config.sample_rate * self.config.frame_ms / 1000.0))
         output_lengths = input_lengths // frame_len
         output_lengths = (output_lengths - 1) // 2 + 1
@@ -1178,13 +1180,13 @@ class MoonshineStreamingModel(MoonshineStreamingPreTrainedModel):
         )
 
 
-class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedModel, GenerationMixin):
+class MoonshineStreamingForConditionalGeneration(MoonshineForConditionalGeneration):
     """
     The MoonshineStreaming model with a language modeling head for speech-to-text transcription.
 
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
+    This model inherits from [`MoonshineForConditionalGeneration`]. Check the superclass documentation for the generic
+    methods the library implements for all its model (such as downloading or saving, resizing the input embeddings,
+    pruning heads etc.)
 
     This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
     Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
@@ -1215,22 +1217,26 @@ class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedMod
         ```
     """
 
-    _tied_weights_keys = {"lm_head.weight": "model.decoder.embed_tokens.weight"}
+    config_class = MoonshineStreamingConfig
+    supports_gradient_checkpointing = False
 
     def __init__(self, config: MoonshineStreamingConfig):
-        super().__init__(config)
+        # Call grandparent's __init__ to skip MoonshineForConditionalGeneration's model creation
+        MoonshineStreamingPreTrainedModel.__init__(self, config)
         self.model = MoonshineStreamingModel(config)
-        self.lm_head = nn.Linear(config.decoder_dim, config.vocab_size, bias=False)
+        self.proj_out = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
-    def get_output_embeddings(self):
-        return self.lm_head
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
-
-    def get_input_embeddings(self) -> nn.Module:
-        return self.model.get_input_embeddings()
+    def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor) -> torch.LongTensor:
+        """
+        Computes the output length of the convolutional layers for MoonshineStreaming.
+        Different from Moonshine due to frame-based preprocessing with causal convolutions.
+        """
+        frame_len = int(round(self.config.sample_rate * self.config.frame_ms / 1000.0))
+        output_lengths = input_lengths // frame_len
+        output_lengths = (output_lengths - 1) // 2 + 1
+        output_lengths = (output_lengths - 1) // 2 + 1
+        return output_lengths
 
     def _prepare_encoder_decoder_kwargs_for_generation(
         self,
@@ -1317,7 +1323,7 @@ class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedMod
         else:
             decoder_hidden = outputs[0]
 
-        logits = self.lm_head(decoder_hidden)
+        logits = self.proj_out(decoder_hidden)
         loss = None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)

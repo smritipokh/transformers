@@ -42,7 +42,7 @@ from ...modeling_outputs import (
     Seq2SeqModelOutput,
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...utils import logging
+from ...utils import auto_docstring, can_return_tuple, logging
 from .configuration_moonshine_streaming import MoonshineStreamingConfig
 
 
@@ -1014,15 +1014,26 @@ class MoonshineStreamingDecoder(nn.Module):
         )
 
 
+@auto_docstring
 class MoonshineStreamingPreTrainedModel(PreTrainedModel):
-    config_class = MoonshineStreamingConfig
+    config: MoonshineStreamingConfig
     base_model_prefix = "model"
     main_input_name = "input_values"
     input_modalities = "audio"
+    supports_gradient_checkpointing = False
+    _no_split_modules = ["MoonshineStreamingEncoderLayer", "MoonshineStreamingDecoderLayer"]
     _supports_flash_attn = True
     _supports_sdpa = True
 
+    _can_compile_fullgraph = True
+    config_class = MoonshineStreamingConfig
+    # TODO arthur, how do we separate when it cross / self coming from different layer?
+
     def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor) -> torch.LongTensor:
+        """
+        Computes the output length of the convolutional layers for MoonshineStreaming.
+        Different from Moonshine due to frame-based preprocessing with causal convolutions.
+        """
         frame_len = int(round(self.config.sample_rate * self.config.frame_ms / 1000.0))
         output_lengths = input_lengths // frame_len
         output_lengths = (output_lengths - 1) // 2 + 1
@@ -1201,13 +1212,18 @@ def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start
     return shifted_input_ids
 
 
+@auto_docstring(
+    custom_intro="""
+    The MoonshineStreaming Model with a language modeling head. Can be used for automatic speech recognition.
+    """
+)
 class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedModel, GenerationMixin):
     """
     The MoonshineStreaming model with a language modeling head for speech-to-text transcription.
 
-    This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
-    library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
-    etc.)
+    This model inherits from [`MoonshineForConditionalGeneration`]. Check the superclass documentation for the generic
+    methods the library implements for all its model (such as downloading or saving, resizing the input embeddings,
+    pruning heads etc.)
 
     This model is also a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) subclass.
     Use it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage
@@ -1238,22 +1254,143 @@ class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedMod
         ```
     """
 
-    _tied_weights_keys = {"lm_head.weight": "model.decoder.embed_tokens.weight"}
+    _tied_weights_keys = {"proj_out.weight": "model.decoder.embed_tokens.weight"}
+
+    config_class = MoonshineStreamingConfig
+    supports_gradient_checkpointing = False
 
     def __init__(self, config: MoonshineStreamingConfig):
+        # Call grandparent's __init__ to skip MoonshineForConditionalGeneration's model creation
         super().__init__(config)
         self.model = MoonshineStreamingModel(config)
-        self.lm_head = nn.Linear(config.decoder_dim, config.vocab_size, bias=False)
+        self.proj_out = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
 
     def get_output_embeddings(self):
-        return self.lm_head
+        return self.proj_out
 
     def set_output_embeddings(self, new_embeddings):
-        self.lm_head = new_embeddings
+        self.proj_out = new_embeddings
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_values: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        decoder_input_ids: Optional[torch.Tensor] = None,
+        decoder_attention_mask: Optional[torch.Tensor] = None,
+        encoder_outputs: Optional[BaseModelOutput] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+        decoder_inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Cache] = None,
+        cache_position: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Seq2SeqLMOutput:
+        r"""
+        input_values (`torch.FloatTensor` of shape `(batch_size, audio_length)`):
+            Float values of the raw speech waveform. Raw speech waveform can be
+            obtained by loading a `.flac` or `.wav` audio file into an array of type `list[float]`, a
+            `numpy.ndarray` or a `torch.Tensor`, *e.g.* via the torchcodec library (`pip install torchcodec`) or
+            the soundfile library (`pip install soundfile`). To prepare the array into
+            `input_values`, the [`AutoFeatureExtractor`] should be used for padding
+            and conversion into a tensor of type `torch.FloatTensor`.
+        decoder_position_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`):
+            Indices of positions of each input sequence tokens in the position embeddings.
+            Used to calculate the position embeddings up to `config.decoder_config.max_position_embeddings`
+
+        Example:
+
+        ```python
+        >>> import torch
+        >>> from transformers import AutoProcessor, MoonshineStreamingForConditionalGeneration
+        >>> from datasets import load_dataset
+
+        >>> processor = AutoProcessor.from_pretrained("UsefulSensors/moonshine_streaming-tiny")
+        >>> model = MoonshineStreamingForConditionalGeneration.from_pretrained("UsefulSensors/moonshine_streaming-tiny")
+
+        >>> ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
+
+        >>> inputs = processor(ds[0]["audio"]["array"], return_tensors="pt")
+        >>> input_values = inputs.input_values
+
+        >>> generated_ids = model.generate(input_values, max_new_tokens=100)
+
+        >>> transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        >>> transcription
+        'Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.'
+        ```"""
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
+            decoder_input_ids = shift_tokens_right(
+                labels, self.config.pad_token_id, self.config.decoder_start_token_id
+            )
+        if labels is not None:
+            if use_cache:
+                logger.warning("The `use_cache` argument is changed to `False` since `labels` is provided.")
+            use_cache = False
+
+        outputs = self.model(
+            input_values=input_values,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_input_ids,
+            decoder_attention_mask=decoder_attention_mask,
+            encoder_outputs=encoder_outputs,
+            encoder_attention_mask=encoder_attention_mask,
+            decoder_inputs_embeds=decoder_inputs_embeds,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            output_hidden_states=output_hidden_states,
+            output_attentions=output_attentions,
+            return_dict=return_dict,
+        )
+
+        if return_dict:
+            decoder_hidden = outputs.last_hidden_state
+        else:
+            decoder_hidden = outputs[0]
+
+        logits = self.proj_out(decoder_hidden)
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return Seq2SeqLMOutput(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
+
+    def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor) -> torch.LongTensor:
+        """
+        Computes the output length of the convolutional layers for MoonshineStreaming.
+        Different from Moonshine due to frame-based preprocessing with causal convolutions.
+        """
+        frame_len = int(round(self.config.sample_rate * self.config.frame_ms / 1000.0))
+        output_lengths = input_lengths // frame_len
+        output_lengths = (output_lengths - 1) // 2 + 1
+        output_lengths = (output_lengths - 1) // 2 + 1
+        return output_lengths
 
     def _prepare_encoder_decoder_kwargs_for_generation(
         self,
@@ -1289,77 +1426,6 @@ class MoonshineStreamingForConditionalGeneration(MoonshineStreamingPreTrainedMod
         model_kwargs["encoder_attention_mask"] = encoder_attention_mask
         model_kwargs["attention_mask"] = encoder_attention_mask
         return model_kwargs
-
-    def forward(
-        self,
-        input_values: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        decoder_input_ids: Optional[torch.Tensor] = None,
-        decoder_attention_mask: Optional[torch.Tensor] = None,
-        encoder_outputs: Optional[BaseModelOutput] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        decoder_inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.Tensor] = None,
-        use_cache: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Seq2SeqLMOutput:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
-            decoder_input_ids = shift_tokens_right(
-                labels, self.config.pad_token_id, self.config.decoder_start_token_id
-            )
-        if labels is not None:
-            if use_cache:
-                logger.warning("The `use_cache` argument is changed to `False` since `labels` is provided.")
-            use_cache = False
-
-        outputs = self.model(
-            input_values=input_values,
-            attention_mask=attention_mask,
-            decoder_input_ids=decoder_input_ids,
-            decoder_attention_mask=decoder_attention_mask,
-            encoder_outputs=encoder_outputs,
-            encoder_attention_mask=encoder_attention_mask,
-            decoder_inputs_embeds=decoder_inputs_embeds,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
-            return_dict=return_dict,
-        )
-
-        if return_dict:
-            decoder_hidden = outputs.last_hidden_state
-        else:
-            decoder_hidden = outputs[0]
-
-        logits = self.lm_head(decoder_hidden)
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return Seq2SeqLMOutput(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-        )
 
 
 __all__ = [
