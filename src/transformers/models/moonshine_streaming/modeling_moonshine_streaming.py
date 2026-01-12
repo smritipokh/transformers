@@ -579,14 +579,15 @@ def frame_nonoverlap_drop_tail(
     batch_size, max_length = wav.shape
     lengths = lengths.clamp(max=max_length)
     frame_mask, n_frames = make_frame_mask(lengths, frame_len)
-    max_frames = frame_mask.size(1)
 
-    frames = wav.new_zeros(batch_size, max_frames, frame_len)
-    for idx in range(batch_size):
-        frame_count = int(n_frames[idx].item())
-        if frame_count > 0:
-            trunc = frame_count * frame_len
-            frames[idx, :frame_count] = wav[idx, :trunc].reshape(frame_count, frame_len)
+    max_frames = frame_mask.size(1)
+    if max_frames == 0:
+        return torch.zeros(batch_size, 0, frame_len, device=wav.device, dtype=wav.dtype), frame_mask, n_frames
+
+    required_len = max_frames * frame_len
+    wav_truncated = wav[:, :required_len]
+    frames = wav_truncated.reshape(batch_size, max_frames, frame_len)
+    frames = frames * frame_mask.unsqueeze(-1)
     return frames, frame_mask, n_frames
 
 
