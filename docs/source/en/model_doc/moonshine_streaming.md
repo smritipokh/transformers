@@ -74,8 +74,8 @@ inputs = processor(audio_sample["array"], return_tensors="pt")
 inputs = inputs.to(model.device)
 
 generated_ids = model.generate(**inputs, max_new_tokens=100)
-transcription = processor.batch_decode(generated_ids, skip_special_tokens=True)
-transcription[0]
+transcription = processor.decode(generated_ids[0], skip_special_tokens=True)
+transcription
 ```
 
 </hfoption>
