@@ -185,14 +185,14 @@ class MoonshineStreamingRotaryEmbedding(nn.Module):
 class MoonshineStreamingLayerNorm(nn.Module):
     def __init__(self, dim: int, unit_offset: bool = True, device=None, dtype=None):
         super().__init__()
-        self.unit_offset = unit_offset
+        self.unit_offset = float(unit_offset)
         self.ln = nn.LayerNorm(dim, elementwise_affine=False, device=device, dtype=dtype)
         self.gamma = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
-        nn.init.constant_(self.gamma, 1.0 - float(unit_offset))
+        nn.init.constant_(self.gamma, 1.0 - self.unit_offset)
 
     def forward(self, x: Tensor) -> Tensor:
         normed = self.ln(x)
-        gamma = self.gamma + float(self.unit_offset)
+        gamma = self.gamma + self.unit_offset
         return normed * gamma
 
 
@@ -703,9 +703,6 @@ class MoonshineStreamingDecoder(nn.Module):
             self.rotary = None
         self.final_norm = MoonshineStreamingLayerNorm(config.decoder_dim)
         self.final_dropout = nn.Dropout(config.ff_dropout)
-
-    def get_logits(self, x: Tensor) -> Tensor:
-        return x @ self.embed_tokens.weight.t()
 
     def forward(
         self,
