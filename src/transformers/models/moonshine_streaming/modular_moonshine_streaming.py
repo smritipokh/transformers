@@ -263,7 +263,7 @@ class MoonshineStreamingEncoder(MoonshineStreamingPreTrainedModel):
     def forward(
         self,
         input_values: torch.FloatTensor,
-        padding_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
         r"""
@@ -281,7 +281,7 @@ class MoonshineStreamingEncoder(MoonshineStreamingPreTrainedModel):
                 - 0 for tokens that are **masked**.
                 [What are attention masks?](../glossary#attention-mask)
         """
-        inputs_embeds, attention_mask = self.embedder(input_values, padding_mask=padding_mask)
+        inputs_embeds, attention_mask = self.embedder(input_values, padding_mask=attention_mask)
 
         if attention_mask is not None:
             mask_kwargs = {
@@ -365,57 +365,6 @@ class MoonshineStreamingDecoder(MoonshineDecoder):
         )
 
 
-class MoonshineStreamingModel(MoonshineModel):
-    def _mask_input_features(self):
-        raise AttributeError("Not needed for MoonshineStreaming")
-
-    @can_return_tuple
-    @auto_docstring
-    def forward(
-        self,
-        input_values: Optional[torch.FloatTensor] = None,
-        padding_mask: Optional[torch.LongTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-        encoder_outputs: Optional[tuple[tuple[torch.FloatTensor]]] = None,
-        past_key_values: Optional[EncoderDecoderCache] = None,
-        decoder_inputs_embeds: Optional[tuple[torch.FloatTensor]] = None,
-        decoder_position_ids: Optional[tuple[torch.LongTensor]] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> Seq2SeqModelOutput:
-        if encoder_outputs is None:
-            encoder_outputs: BaseModelOutput = self.encoder(input_values, padding_mask=padding_mask, **kwargs)
-    
-        kwargs.pop("attention_mask", None)
-        kwargs.pop("encoder_attention_mask", None)
-
-        decoder_outputs: BaseModelOutputWithPastAndCrossAttentions = self.decoder(
-            input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask,
-            encoder_hidden_states=encoder_outputs.last_hidden_state,
-            encoder_attention_mask=encoder_outputs.attention_mask,
-            past_key_values=past_key_values,
-            inputs_embeds=decoder_inputs_embeds,
-            position_ids=decoder_position_ids,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            **kwargs,
-        )
-
-        return Seq2SeqModelOutput(
-            last_hidden_state=decoder_outputs.last_hidden_state,
-            past_key_values=decoder_outputs.past_key_values,
-            decoder_hidden_states=decoder_outputs.hidden_states,
-            decoder_attentions=decoder_outputs.attentions,
-            cross_attentions=decoder_outputs.cross_attentions,
-            encoder_last_hidden_state=encoder_outputs.last_hidden_state,
-            encoder_hidden_states=encoder_outputs.hidden_states,
-            encoder_attentions=encoder_outputs.attentions,
-        )
-
-
 class MoonshineStreamingForConditionalGeneration(MoonshineForConditionalGeneration):
     def _get_feat_extract_output_lengths(self, input_lengths: torch.LongTensor) -> torch.LongTensor:
         """
@@ -427,41 +376,6 @@ class MoonshineStreamingForConditionalGeneration(MoonshineForConditionalGenerati
         output_lengths = (output_lengths - 1) // 2 + 1
         output_lengths = (output_lengths - 1) // 2 + 1
         return output_lengths
-
-    def _prepare_encoder_decoder_kwargs_for_generation(
-        self,
-        inputs_tensor: torch.Tensor,
-        model_kwargs,
-        model_input_name: Optional[str],
-        generation_config,
-    ):
-        del model_input_name
-        padding_mask = model_kwargs.get("padding_mask", None)
-
-        # Pass raw audio directly to encoder (preprocessing is now handled internally)
-        encoder_outputs = self.model.encoder(
-            input_values=inputs_tensor,
-            padding_mask=padding_mask,
-            output_attentions=generation_config.output_attentions,
-            output_hidden_states=generation_config.output_hidden_states,
-            return_dict=True,
-        )
-
-        # Compute encoder attention mask from input lengths
-        if padding_mask is not None:
-            lengths = padding_mask.sum(-1).to(dtype=torch.long)
-            encoder_lengths = self._get_feat_extract_output_lengths(lengths)
-            seq_len = encoder_outputs.last_hidden_state.shape[1]
-            encoder_attention_mask = torch.arange(
-                seq_len, device=encoder_outputs.last_hidden_state.device
-            ) < encoder_lengths.unsqueeze(1)
-        else:
-            encoder_attention_mask = None
-
-        model_kwargs["encoder_outputs"] = encoder_outputs
-        model_kwargs["encoder_attention_mask"] = encoder_attention_mask
-        model_kwargs["attention_mask"] = encoder_attention_mask
-        return model_kwargs
 
 
 __all__ = [

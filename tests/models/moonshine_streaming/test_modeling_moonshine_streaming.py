@@ -624,7 +624,6 @@ class MoonshineStreamingModelIntegrationTests(unittest.TestCase):
 
         audio_array = self._load_datasamples(4)
         inputs = self.processor_tiny(audio_array, return_tensors="pt", padding=True)
-        inputs["padding_mask"] = inputs.pop("attention_mask")
         inputs.to(torch_device)
         generated_ids = model.generate(**inputs, max_new_tokens=20)
         transcript = self.processor_tiny.batch_decode(generated_ids, skip_special_tokens=True)
