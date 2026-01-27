@@ -226,6 +226,30 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         self.attention_bias = attention_bias
         self.pad_head_dim_to_multiple_of = pad_head_dim_to_multiple_of
         self.use_cache = use_cache
+        
+        #########################################
+        self.encoder_hidden_size = encoder_dim
+        self.attention_probs_dropout_prob = attn_dropout
+        self.encoder_hidden_act = "gelu"
+        self.decoder_hidden_act = "silu"
+        self.intermediate_size = ffn_mult * decoder_dim
+        self.decoder_num_hidden_layers = num_hidden_layers
+        self.decoder_num_key_value_heads = decoder_num_attention_heads
+        self.decoder_num_attention_heads = decoder_num_attention_heads
+        self.max_position_embeddings = adapter_max_positions
+
+        partial_rotary_factor = decoder_rotary_dim / head_dim if head_dim else 1.0
+        self.rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": rotary_base,
+            "partial_rotary_factor": partial_rotary_factor,
+        }
+
+        self.encoder_num_attention_heads = encoder_num_attention_heads
+        self.encoder_num_key_value_heads = encoder_num_attention_heads
+        self.sliding_windows = [(16, 4), (16, 4), (16, 0), (16, 0), (16, 4), (16, 4)]
+        #########################################
+
 
         kwargs.setdefault("is_encoder_decoder", True)
         super().__init__(

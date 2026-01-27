@@ -19,6 +19,7 @@
 # limitations under the License.
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
@@ -30,8 +31,7 @@ from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, EncoderDecoderCache
 from ...generation import GenerationMixin
 from ...integrations import use_kernelized_func
-from ...masking_utils import create_causal_mask
-from ...modeling_attn_mask_utils import _prepare_4d_attention_mask, _prepare_4d_attention_mask_for_sdpa
+from ...masking_utils import create_bidirectional_mask, create_causal_mask
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import (
@@ -47,6 +47,16 @@ from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 from ...utils.generic import maybe_autocast
 from .configuration_moonshine import MoonshineConfig
+
+
+@dataclass
+@auto_docstring(
+    custom_intro="""
+    Extends [~modeling_outputs.BaseModelOutput] to include the output attention mask since sequence length is not preserved in the model's forward.
+    """
+)
+class MoonshineEncoderModelOutput(BaseModelOutput):
+    attention_mask: Optional[torch.Tensor] = None
 
 
 class MoonshineEncoderMLP(nn.Module):
@@ -585,12 +595,14 @@ class MoonshineEncoder(MoonshinePreTrainedModel):
             mask_len = self._get_feat_extract_output_lengths(attention_mask.shape[-1])
             downsample_stride = 64 * 3 * 2  # conv strides
             attention_mask = attention_mask[..., ::downsample_stride][..., :mask_len]
-            if self.config._attn_implementation == "flash_attention_2":
-                attention_mask = attention_mask if (attention_mask == 0.0).any() else None
-            elif self.config._attn_implementation == "sdpa":
-                attention_mask = _prepare_4d_attention_mask_for_sdpa(attention_mask, hidden_states.dtype)
-            else:
-                attention_mask = _prepare_4d_attention_mask(attention_mask, hidden_states.dtype)
+            output_attention_mask = attention_mask
+
+        attention_mask = create_bidirectional_mask(
+            config=self.config,
+            input_embeds=hidden_states,
+            attention_mask=attention_mask,
+            encoder_hidden_states=hidden_states,
+        )
 
         position_ids = torch.arange(0, hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
         position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
@@ -606,8 +618,9 @@ class MoonshineEncoder(MoonshinePreTrainedModel):
 
         hidden_states = self.layer_norm(hidden_states)
 
-        return BaseModelOutputWithPast(
+        return MoonshineEncoderModelOutput(
             last_hidden_state=hidden_states,
+            attention_mask=output_attention_mask.int() if attention_mask is not None else None,
         )
 
 
@@ -686,24 +699,15 @@ class MoonshineDecoder(MoonshinePreTrainedModel):
             past_key_values=past_key_values,
             position_ids=position_ids,
         )
+        encoder_attention_mask = create_bidirectional_mask(
+            config=self.config,
+            input_embeds=inputs_embeds,
+            attention_mask=encoder_attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
+        )
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
-
-        if encoder_attention_mask is not None:
-            mask_len = encoder_hidden_states.shape[-2]
-            downsample_stride = 64 * 3 * 2  # conv strides
-            encoder_attention_mask = encoder_attention_mask[..., ::downsample_stride][..., :mask_len]
-            if self.config._attn_implementation == "flash_attention_2":
-                encoder_attention_mask = encoder_attention_mask if (encoder_attention_mask == 0.0).any() else None
-            elif self.config._attn_implementation == "sdpa":
-                encoder_attention_mask = _prepare_4d_attention_mask_for_sdpa(
-                    encoder_attention_mask, hidden_states.dtype, hidden_states.shape[-2]
-                )
-            else:
-                encoder_attention_mask = _prepare_4d_attention_mask(
-                    encoder_attention_mask, hidden_states.dtype, hidden_states.shape[-2]
-                )
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
@@ -809,8 +813,8 @@ class MoonshineModel(MoonshinePreTrainedModel):
         decoder_outputs: BaseModelOutputWithPastAndCrossAttentions = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
-            encoder_attention_mask=attention_mask,
             encoder_hidden_states=encoder_outputs.last_hidden_state,
+            encoder_attention_mask=encoder_outputs.attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=decoder_inputs_embeds,
             position_ids=decoder_position_ids,
