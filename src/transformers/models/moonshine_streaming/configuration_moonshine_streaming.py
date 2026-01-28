@@ -28,7 +28,7 @@ class MoonshineStreamingEncoderConfig(PreTrainedConfig):
         hidden_size: Optional[int] = 320,
         intermediate_size: Optional[int] = 1280,
         hidden_act: Optional[str] = "gelu",
-        num_hidden_layers: Optional[int] = 10,
+        num_hidden_layers: Optional[int] = 6,
         num_attention_heads: Optional[int] = 8,
         num_key_value_heads: Optional[int] = 8,
         max_position_embeddings: Optional[int] = 4096,
@@ -66,7 +66,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         vocab_size: int = 32768,
         hidden_size: Optional[int] = 320,
         intermediate_size: Optional[int] = 1280,
-        num_hidden_layers: Optional[int] = 10,
+        num_hidden_layers: Optional[int] = 6,
         num_attention_heads: Optional[int] = 8,
         hidden_act: Optional[str] = "silu",
         max_position_embeddings: int = 4096,
@@ -105,12 +105,12 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         self.rope_parameters = rope_parameters
         self.pad_head_dim_to_multiple_of = pad_head_dim_to_multiple_of
 
+        kwargs["is_encoder_decoder"] = True
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             decoder_start_token_id=decoder_start_token_id,
-            is_encoder_decoder=True,
             **kwargs,
         )
 
