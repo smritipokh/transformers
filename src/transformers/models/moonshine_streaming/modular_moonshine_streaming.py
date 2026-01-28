@@ -23,35 +23,40 @@ from torch import Tensor
 
 from transformers.utils.generic import check_model_inputs
 
-from ...cache_utils import Cache, EncoderDecoderCache
-from ...cache_utils import DynamicCache
+from ...cache_utils import Cache
 from ...masking_utils import create_bidirectional_mask
-from ...modeling_attn_mask_utils import _prepare_4d_attention_mask, _prepare_4d_attention_mask_for_sdpa
 from ...modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPast,
-    BaseModelOutputWithPastAndCrossAttentions,
-    Seq2SeqModelOutput,
 )
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS
-from ...processing_utils import Unpack
+from ...processing_utils import ProcessingKwargs, Unpack
 from ...utils import TransformersKwargs, auto_docstring, logging
-from ...utils.generic import can_return_tuple
-from ..bert.modeling_bert import BertSelfAttention
-from ..llama.modeling_llama import LlamaMLP, LlamaAttention, eager_attention_forward
+from ..llama.modeling_llama import LlamaMLP, eager_attention_forward
 from ..moonshine.modeling_moonshine import (
     MoonshineDecoder,
     MoonshineEncoderLayer,
     MoonshineEncoderMLP,
     MoonshineForConditionalGeneration,
     MoonshineModel,
-    MoonshineDecoderLayer,
     MoonshinePreTrainedModel,
 )
+from ..wav2vec2.processing_wav2vec2 import Wav2Vec2Processor
 from .configuration_moonshine_streaming import MoonshineStreamingConfig, MoonshineStreamingEncoderConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+class MoonshineStreamingProcessorKwargs(ProcessingKwargs, total=False):
+    _defaults = {
+        "audio_kwargs": {
+            "pad_to_multiple_of": 80,
+        },
+    }
+
+
+class MoonshineStreamingProcessor(Wav2Vec2Processor): ...
 
 
 @dataclass
@@ -111,6 +116,7 @@ class MoonshineStreamingCausalConv1d(nn.Conv1d):
 
         return x, mask.squeeze(1)
 
+
 class MoonshineStreamingLayerNorm(nn.Module):
     def __init__(self, dim: int, unit_offset: bool = True, device=None, dtype=None):
         super().__init__()
@@ -126,7 +132,6 @@ class MoonshineStreamingLayerNorm(nn.Module):
 
 
 class MoonshineStreamingEncoderMLP(MoonshineEncoderMLP): ...
-
 
 
 class MoonshineStreamingEncoderAttention(nn.Module):
@@ -228,6 +233,7 @@ class MoonshineStreamingEncoderEmbedder(nn.Module):
         hidden_states = hidden_states.transpose(1, 2)
         return hidden_states, padding_mask
 
+
 class MoonshineStreamingPreTrainedModel(MoonshinePreTrainedModel):
     supports_gradient_checkpointing = False  # TODO: check
 
@@ -325,7 +331,7 @@ class MoonshineStreamingDecoder(MoonshineDecoder):
             self.proj = nn.Linear(config.encoder_config.hidden_size, config.hidden_size, bias=False)
         else:
             self.proj = nn.Identity()
-    
+
     @check_model_inputs
     def forward(
         self,
@@ -392,4 +398,5 @@ __all__ = [
     "MoonshineStreamingPreTrainedModel",
     "MoonshineStreamingModel",
     "MoonshineStreamingForConditionalGeneration",
+    "MoonshineStreamingProcessor",
 ]

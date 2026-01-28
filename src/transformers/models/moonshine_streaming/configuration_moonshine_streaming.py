@@ -37,6 +37,7 @@ class MoonshineStreamingEncoderConfig(PreTrainedConfig):
         sample_rate: int = 16000,
         frame_ms: float = 5.0,
         sliding_windows: list[tuple[int, int]] = [(16, 4), (16, 4), (16, 0), (16, 0), (16, 4), (16, 4)],
+        head_dim: Optional[int] = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -48,6 +49,7 @@ class MoonshineStreamingEncoderConfig(PreTrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.attention_dropout = attention_dropout
         self.attention_bias = attention_bias
+        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
         self.sample_rate = sample_rate
         self.frame_ms = frame_ms
         self.sliding_windows = sliding_windows
@@ -74,10 +76,14 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
-        rope_parameters: Optional[RopeParameters | dict[str, RopeParameters]] = {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.8},
+        rope_parameters: Optional[RopeParameters | dict[str, RopeParameters]] = {
+            "rope_type": "default",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.8,
+        },
         attention_bias: bool = False,
         attention_dropout: float = 0.0,
-        decoder_start_token_id: Optional[int] = None, 
+        decoder_start_token_id: Optional[int] = None,
         head_dim: Optional[int] = None,
         pad_head_dim_to_multiple_of: Optional[int] = None,
         **kwargs,
@@ -89,7 +95,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
             encoder_config = CONFIG_MAPPING["moonshine_streaming_encoder"]()
 
         self.encoder_config = encoder_config
-        
+
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -105,7 +111,7 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         self.rope_parameters = rope_parameters
         self.pad_head_dim_to_multiple_of = pad_head_dim_to_multiple_of
 
-        kwargs["is_encoder_decoder"] = True
+        kwargs.update(tie_word_embeddings=False, is_encoder_decoder=True)
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,

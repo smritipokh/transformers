@@ -13,8 +13,8 @@
 # limitations under the License.
 
 from collections.abc import Callable
-from typing import Optional, Union
 from dataclasses import dataclass
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -25,8 +25,7 @@ from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, EncoderDecoderCache
 from ...configuration_utils import PreTrainedConfig
 from ...generation import GenerationMixin
-from ...masking_utils import create_causal_mask, create_bidirectional_mask
-from ...modeling_attn_mask_utils import _prepare_4d_attention_mask, _prepare_4d_attention_mask_for_sdpa
+from ...masking_utils import create_bidirectional_mask, create_causal_mask
 from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import (
@@ -577,9 +576,10 @@ class MoonshineEncoder(MoonshinePreTrainedModel):
         hidden_states = self.layer_norm(hidden_states)
 
         return MoonshineEncoderModelOutput(
-            last_hidden_state=hidden_states, 
+            last_hidden_state=hidden_states,
             attention_mask=output_attention_mask.int() if attention_mask is not None else None,
         )
+
 
 class MoonshineDecoder(LlamaModel):
     main_input_name = "input_ids"
@@ -592,9 +592,7 @@ class MoonshineDecoder(LlamaModel):
     def __init__(self, config: MoonshineConfig):
         super().__init__(config)
         self.norm = nn.LayerNorm(config.hidden_size, bias=False)
-        self.layers = nn.ModuleList(
-            [MoonshineDecoderLayer(config, idx) for idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([MoonshineDecoderLayer(config, idx) for idx in range(config.num_hidden_layers)])
 
     @check_model_inputs
     def forward(
@@ -733,7 +731,7 @@ class MoonshineModel(WhisperModel):
 
         decoder_outputs: BaseModelOutputWithPastAndCrossAttentions = self.decoder(
             input_ids=decoder_input_ids,
-            attention_mask=decoder_attention_mask, 
+            attention_mask=decoder_attention_mask,
             encoder_hidden_states=encoder_outputs.last_hidden_state,
             encoder_attention_mask=encoder_outputs.attention_mask,
             past_key_values=past_key_values,
