@@ -310,10 +310,12 @@ class CLIPSegAttention(nn.Module):
         attention_mask: torch.Tensor | None = None,
         causal_attention_mask: torch.Tensor | None = None,
         output_attentions: bool | None = False,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel"""
 
         batch_size, seq_length, embed_dim = hidden_states.shape
+        output_attentions = kwargs.get("output_attentions", output_attentions)
 
         queries = self.q_proj(hidden_states)
         keys = self.k_proj(hidden_states)
@@ -345,6 +347,7 @@ class CLIPSegAttention(nn.Module):
             is_causal=self.is_causal,
             scaling=self.scale,
             dropout=0.0 if not self.training else self.dropout,
+            **kwargs,
         )
 
         attn_output = attn_output.reshape(batch_size, seq_length, embed_dim).contiguous()
@@ -387,11 +390,11 @@ class CLIPSegEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor,
         causal_attention_mask: torch.Tensor,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.FloatTensor:
+    ) -> tuple[torch.FloatTensor, torch.Tensor | None]:
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states, _ = self.self_attn(
+        hidden_states, attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             causal_attention_mask=causal_attention_mask,
@@ -404,7 +407,7 @@ class CLIPSegEncoderLayer(GradientCheckpointingLayer):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        return hidden_states
+        return hidden_states, attn_weights
 
 
 @auto_docstring
@@ -512,7 +515,7 @@ class CLIPSegEncoder(nn.Module):
                 **kwargs,
             )
 
-            hidden_states = layer_outputs
+            hidden_states = layer_outputs[0]
 
         return BaseModelOutput(
             last_hidden_state=hidden_states,
