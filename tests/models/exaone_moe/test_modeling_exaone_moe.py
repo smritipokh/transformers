@@ -90,10 +90,10 @@ class ExaoneMoeIntegrationTest(unittest.TestCase):
             out = model(input_ids).logits.float().cpu()
 
         EXPECTED_MEAN = torch.tensor(
-            [[-2.2473, -3.0852, -3.2247, -3.2703, -3.1788, -3.4018, -3.1170, -3.2592, -3.8799, -0.6852]]
+            [[-2.2811, -3.0758, -3.2045, -3.2781, -3.1922, -3.4075, -3.1336, -3.2716, -3.8918, -0.6952]]
         )
         EXPECTED_SLICE = torch.tensor(
-            [-2.3906, -3.0312, 2.6875, -3.0156, 0.4980, -1.4375, -1.8672, -2.6719, -1.7656, -2.0938]
+            [-2.4219, -3.0938, 2.7812, -3.0625, 0.5078, -1.4531, -1.9219, -2.7031, -1.7969, -2.1250]
         )
         torch.testing.assert_close(out.mean(-1), EXPECTED_MEAN, atol=1e-2, rtol=1e-2)
         torch.testing.assert_close(out[0, 0, :10], EXPECTED_SLICE, atol=1e-4, rtol=1e-4)
@@ -108,7 +108,7 @@ class ExaoneMoeIntegrationTest(unittest.TestCase):
         input_ids = tokenizer(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
 
         with torch.no_grad():
-            generated_ids = model.generate(input_ids, max_new_tokens=20, do_sample=False)
+            generated_ids = model.generate(**input_ids, max_new_tokens=20, do_sample=False)
         text = tokenizer.decode(generated_ids[0], skip_special_tokens=False)
         self.assertEqual(EXPECTED_TEXT, text)
 

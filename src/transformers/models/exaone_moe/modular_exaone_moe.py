@@ -165,6 +165,7 @@ class ExaoneMoeConfig(Exaone4Config, RotaryEmbeddingConfigMixin):
         use_cache=True,
         bos_token_id=0,
         eos_token_id=2,
+        pad_token_id=None,
         tie_word_embeddings=False,
         rope_parameters=None,
         attention_dropout=0.0,
@@ -228,7 +229,11 @@ class ExaoneMoeConfig(Exaone4Config, RotaryEmbeddingConfigMixin):
         layer_type_validation(self.mlp_layer_types, self.num_hidden_layers, attention=False)
 
         PreTrainedConfig.__init__(
-            bos_token_id=bos_token_id, eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
         )
 
 
