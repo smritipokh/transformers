@@ -19,9 +19,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from ...configuration_utils import PreTrainedConfig, layer_type_validation
+from ...modeling_rope_utils import RotaryEmbeddingConfigMixin
 
 
-class ExaoneMoeConfig(PreTrainedConfig):
+class ExaoneMoeConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin):
     r"""
     This is the configuration class to store the configuration of a [`ExaoneMoeModel`]. It is used to
     instantiate a EXAONE MoE model according to the specified arguments, defining the model architecture. Instantiating a

@@ -22,6 +22,7 @@ import torch.nn as nn
 from ... import initialization as init
 from ...cache_utils import Cache
 from ...configuration_utils import PreTrainedConfig, layer_type_validation
+from ...modeling_rope_utils import RotaryEmbeddingConfigMixin
 from ...modeling_outputs import CausalLMOutputWithPast
 from ...modeling_utils import PreTrainedModel
 from ...processing_utils import Unpack
@@ -44,7 +45,7 @@ from ..olmoe.modeling_olmoe import (
 from ..qwen2_moe.modeling_qwen2_moe import Qwen2MoeMLP
 
 
-class ExaoneMoeConfig(Exaone4Config):
+class ExaoneMoeConfig(Exaone4Config, RotaryEmbeddingConfigMixin):
     model_type = "exaone_moe"
 
     r"""
