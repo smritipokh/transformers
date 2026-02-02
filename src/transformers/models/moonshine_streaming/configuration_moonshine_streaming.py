@@ -71,7 +71,6 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         num_hidden_layers: Optional[int] = 6,
         num_attention_heads: Optional[int] = 8,
         hidden_act: Optional[str] = "silu",
-        decoder_hidden_act: Optional[str] = "silu",
         max_position_embeddings: int = 4096,
         use_cache: Optional[bool] = True,
         pad_token_id: int = 0,
@@ -105,7 +104,6 @@ class MoonshineStreamingConfig(PreTrainedConfig):
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_attention_heads
         self.hidden_act = hidden_act
-        self.decoder_hidden_act = decoder_hidden_act
         self.use_cache = use_cache
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
