@@ -2342,6 +2342,19 @@ class Trainer:
         else:
             self.optimizer = self.accelerator.prepare(self.optimizer)
 
+        if self.is_deepspeed_enabled and self._created_lr_scheduler:
+            optimizer_param_groups = getattr(self.optimizer, "param_groups", None)
+            scheduler_base_lrs = getattr(self.lr_scheduler, "base_lrs", None)
+            if optimizer_param_groups is not None and scheduler_base_lrs is not None:
+                if len(optimizer_param_groups) != len(scheduler_base_lrs):
+                    logger.warning(
+                        "DeepSpeed modified optimizer param groups after scheduler creation. Rebuilding the scheduler "
+                        "to match the updated optimizer."
+                    )
+                    self.lr_scheduler = None
+                    self._created_lr_scheduler = False
+                    self.create_scheduler(num_training_steps=max_steps, optimizer=self.optimizer)
+
         # since DataLoader was Accelerate prepared w/o a model arg in the same call, we now have to complete the DL wrapping for ALST/UlyssesSP, after model has been prepared
         pc = getattr(self.accelerator, "parallelism_config", None)
         if pc is not None and pc.sp_backend == "deepspeed" and pc.sp_enabled:
