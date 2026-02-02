@@ -29,6 +29,8 @@ from transformers.testing_utils import (
     is_training_distributed_test,
 )
 
+from .test_training_mixin import TrainingConfigMixin
+
 if is_torch_available():
     import torch
     import torch.distributed as dist
@@ -357,30 +359,25 @@ def _test_training_distributed_overfit_impl(mesh, config_class, model_class, tra
             pass  # Ignore cleanup errors
 
 
-class TrainingDistributedTesterMixin(ABC):
+class TrainingDistributedTesterMixin(TrainingConfigMixin, ABC):
     """
-    Mixin for training overfit tests. Add to model test classes alongside ModelTesterMixin.
+    Mixin for distributed training overfit tests with Tensor Parallelism.
+    Add to model test classes alongside ModelTesterMixin.
 
     The model_tester (e.g., CausalLMModelTester) already provides:
       - get_config() -> tiny model config
       - prepare_config_and_inputs_for_common() -> config + input dict
       - causal_lm_class, base_model_class, etc.
 
-    This mixin adds training-specific tests using that infrastructure.
+    This mixin adds distributed training-specific tests using that infrastructure.
+    
+    Note: Base training hyperparameters are inherited from TrainingConfigMixin.
+    We override some values here for faster distributed tests.
     """
 
-    # ============================================================
-    # Training hyperparameters
-    # ============================================================
-    training_overfit_steps: int = 10
-    training_overfit_batch_size: int = 2
-    training_overfit_learning_rate: float = 1e-3
-    training_overfit_seq_length: int = 64
+    # Override for faster distributed tests
+    training_overfit_steps: int = 5
     training_overfit_log_freq: int = 1
-
-    # Loss reduction and grad norm reduction thresholds for passing the test (i.e 95% reduction)
-    training_loss_reduction_threshold: float = 0.9
-    training_grad_norm_reduction_threshold: float = 0.9
 
     @property
     @abstractmethod
