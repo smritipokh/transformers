@@ -783,10 +783,6 @@ class MoonshineStreamingDecoder(MoonshineStreamingPreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
-        encoder_config = config.encoder_config
-        config = config.get_text_config(decoder=True)
-        config.num_key_value_heads = config.num_attention_heads
-        config.decoder_hidden_act = config.hidden_act
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -797,11 +793,10 @@ class MoonshineStreamingDecoder(MoonshineStreamingPreTrainedModel):
         self.norm = nn.LayerNorm(config.hidden_size, bias=False)
         self.rotary_emb = MoonshineStreamingRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
-        encoder_hidden_size = encoder_config.hidden_size
-        self.pos_emb = nn.Embedding(self.config.max_position_embeddings, encoder_hidden_size)
+        self.pos_emb = nn.Embedding(self.config.max_position_embeddings, config.encoder_config.hidden_size)
 
-        if encoder_hidden_size != self.config.hidden_size:
-            self.proj = nn.Linear(encoder_hidden_size, self.config.hidden_size, bias=False)
+        if config.encoder_config.hidden_size != self.config.hidden_size:
+            self.proj = nn.Linear(config.encoder_config.hidden_size, self.config.hidden_size, bias=False)
         else:
             self.proj = nn.Identity()
 
@@ -901,10 +896,6 @@ class MoonshineStreamingModel(MoonshineStreamingPreTrainedModel):
         super().__init__(config)
         self.encoder = MoonshineStreamingEncoder(config.encoder_config)
         self.decoder = MoonshineStreamingDecoder(config)
-        self.encoder.config.output_attentions = self.config.output_attentions
-        self.encoder.config.output_hidden_states = self.config.output_hidden_states
-        self.decoder.config.output_attentions = self.config.output_attentions
-        self.decoder.config.output_hidden_states = self.config.output_hidden_states
         # Initialize weights and apply final processing
         self.post_init()
 

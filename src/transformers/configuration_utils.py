@@ -222,9 +222,9 @@ class PreTrainedConfig(PushToHubMixin, RotaryEmbeddingConfigMixin):
 
         # Attributes common for all models
         self.return_dict = return_dict
-        self.output_hidden_states = output_hidden_states
         self.dtype = dtype
         self._output_attentions = output_attentions  # has public property
+        self._output_hidden_states = output_hidden_states  # has public property
 
         # Less common kwargs, only used by some models
         self.chunk_size_feed_forward = chunk_size_feed_forward
@@ -299,6 +299,41 @@ class PreTrainedConfig(PushToHubMixin, RotaryEmbeddingConfigMixin):
                 f"{self._attn_implementation}. Please set it to 'eager' instead."
             )
         self._output_attentions = value
+
+        # Set it recursively on the subconfigs
+        for subconfig_key in self.sub_configs:
+            subconfig = getattr(self, subconfig_key, None)
+            if subconfig is not None:
+                current_subconfig_output_attentions = getattr(subconfig, "_output_attentions", None)
+                sub_output_attentions = (
+                    value
+                    if not isinstance(value, dict)
+                    else value.get(subconfig_key, current_subconfig_output_attentions)
+                )
+                subconfig._output_attentions = sub_output_attentions
+
+    @property
+    def output_hidden_states(self) -> bool:
+        """
+        `bool`: Whether or not the model should return all hidden-states.
+        """
+        return self._output_hidden_states
+
+    @output_hidden_states.setter
+    def output_hidden_states(self, value: bool):
+        self._output_hidden_states = value
+
+        # Set it recursively on the subconfigs
+        for subconfig_key in self.sub_configs:
+            subconfig = getattr(self, subconfig_key, None)
+            if subconfig is not None:
+                current_subconfig_output_hidden_states = getattr(subconfig, "_output_hidden_states", None)
+                sub_output_hidden_states = (
+                    value
+                    if not isinstance(value, dict)
+                    else value.get(subconfig_key, current_subconfig_output_hidden_states)
+                )
+                subconfig._output_hidden_states = sub_output_hidden_states
 
     @property
     def use_return_dict(self) -> bool:
