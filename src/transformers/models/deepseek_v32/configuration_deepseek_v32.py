@@ -136,6 +136,9 @@ class DeepseekV32Config(PreTrainedConfig, RotaryEmbeddingConfigMixin):
         "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
         "norm": (["hidden_states"], ["hidden_states"]),
     }
+    attribute_map = {
+        "num_local_experts": "n_routed_experts",
+    }
 
     def __init__(
         self,
@@ -225,7 +228,6 @@ class DeepseekV32Config(PreTrainedConfig, RotaryEmbeddingConfigMixin):
         self.index_head_dim = index_head_dim
         self.index_top_k = index_topk
         self.max_seq_len = 16384
-        self.num_local_experts = num_experts_per_tok
         self.intermediate_dim = intermediate_size
 
 

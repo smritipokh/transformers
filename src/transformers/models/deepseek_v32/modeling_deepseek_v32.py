@@ -483,7 +483,7 @@ class DeepseekV32Moe(nn.Module):
         router_logits = router_logits.view(-1, hidden_dim)
         router_logits = router_logits.softmax(dim=-1, dtype=torch.float32)
         group_scores = router_logits.view(batch_size * seq_len, self.num_group, -1).max(dim=-1).values
-        
+
         # Group limited expert routing.
         group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
         group_mask = torch.zeros_like(group_scores)
