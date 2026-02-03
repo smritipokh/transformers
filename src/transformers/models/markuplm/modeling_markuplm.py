@@ -35,7 +35,6 @@ from ...processing_utils import Unpack
 from ...pytorch_utils import apply_chunking_to_forward
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.generic import check_model_inputs
-from ...utils.generic import check_model_inputs
 from .configuration_markuplm import MarkupLMConfig
 
 
