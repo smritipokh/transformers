@@ -750,6 +750,8 @@ class TransformersKwargs(TypedDict, total=False):
             Maximum sequence length for key state.
         position_ids (`torch.LongTensor`, *optional*)
             Indices of positions of each input sequence tokens.
+        is_causal (`bool`, *optional*)
+            Can be set to False to enable bi-directional attention, i.e. use decoder Attention modules as encoders.
     """
 
     num_items_in_batch: Optional["torch.Tensor"]
@@ -761,6 +763,7 @@ class TransformersKwargs(TypedDict, total=False):
     max_length_q: int | None
     max_length_k: int | None
     position_ids: Optional["torch.LongTensor"]
+    is_causal: bool | None
 
 
 def is_timm_config_dict(config_dict: dict[str, Any]) -> bool:
@@ -920,6 +923,14 @@ def check_model_inputs(func=None, *, tie_last_hidden_states=True):
             if return_dict is None:
                 return_dict = getattr(self.config, "return_dict", True)
 
+            # Maybe temporarily overwrite config value to create the correct mask - kwarg takes precedence
+            is_causal = kwargs.pop("is_causal", True)
+            if not is_causal:
+                is_causal_in_config = hasattr(self.config, "is_causal")
+                if is_causal_in_config:
+                    is_causal_original_value = self.config.is_causal
+                self.config.is_causal = False
+
             all_args = kwargs.copy()
             if "kwargs" in all_args:
                 for k, v in all_args["kwargs"].items():
@@ -1017,6 +1028,13 @@ def check_model_inputs(func=None, *, tie_last_hidden_states=True):
             # Restore original forward methods
             for module, original_forward in monkey_patched_layers:
                 module.forward = original_forward
+
+            # Restore original config value
+            if not is_causal:
+                if is_causal_in_config:
+                    self.config.is_causal = is_causal_original_value
+                else:
+                    del self.config.is_causal
 
             # Inject collected outputs into model output
             for key in collected_outputs:

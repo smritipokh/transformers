@@ -865,7 +865,8 @@ def create_causal_mask(
             An optional mask function to combine with the causal mask function (by doing the intersection of both). This is
             useful to easily overlay another mask on top of the causal one, for example for image tokens handling.
     """
-    # Power feature: if `is_causal` is False, then fallback to bi-directional mask for bi-directional attention
+    # Power feature: if `is_causal` is False, then fallback to bi-directional mask for bi-directional attention.
+    # It allows to use decoder-only models with bi-directional attention as well
     if not getattr(config, "is_causal", True):
         return create_bidirectional_mask(
             config,
@@ -1068,6 +1069,7 @@ def create_sliding_window_causal_mask(
             useful to easily overlay another mask on top of the sliding causal one, for example for image tokens handling.
     """
     # Power feature: if `is_causal` is False, then fallback to bi-directional mask for bi-directional attention
+    # It allows to use decoder-only models with bi-directional attention as well
     if not getattr(config, "is_causal", True):
         return create_bidirectional_sliding_window_mask(
             config,
