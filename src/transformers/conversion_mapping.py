@@ -305,24 +305,6 @@ def _build_checkpoint_conversion_mapping():
                 target_patterns="LayerNorm.bias",
             ),
         ],
-        # "moonshine_streaming": [
-        #     WeightRenaming(
-        #         source_patterns=r"encoder\.blocks\.(\d+)",
-        #         target_patterns=r"encoder.layers.\1",
-        #     ),
-        #     WeightRenaming(
-        #         source_patterns=r"encoder\.(conv1|conv2|lin|comp)",
-        #         target_patterns=r"encoder.embedder.\1",
-        #     ),
-        #     WeightRenaming(
-        #         source_patterns=r"adapter\.pos_embed",
-        #         target_patterns=r"decoder.pos_emb",
-        #     ),
-        #     WeightRenaming(
-        #         source_patterns=r"encoder\.embedder\.lin\.weight",
-        #         target_patterns=r"encoder.embedder.linear.weight",
-        #     ),
-        # ],
     }
     if hasattr(torch.nn.utils.parametrizations, "weight_norm"):
         mapping["legacy"] += [
