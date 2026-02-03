@@ -36,6 +36,7 @@ from .utils import (
     WEIGHTS_INDEX_NAME,
     ExplicitEnum,
     check_torch_load_is_safe,
+    is_peft_available,
     is_psutil_available,
     is_torch_available,
     is_torch_cuda_available,
@@ -53,6 +54,15 @@ from .utils import (
 if is_torch_available():
     import torch
     from safetensors.torch import load_file as safe_load_file
+
+if is_peft_available():
+    from peft import PeftMixedModel, PeftModel
+
+
+def _is_peft_model(model):
+    if is_peft_available():
+        return isinstance(model, (PeftModel, PeftMixedModel))
+    return False
 
 
 def seed_worker(worker_id: int, num_workers: int, rank: int):

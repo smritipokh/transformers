@@ -118,6 +118,7 @@ from .trainer_utils import (
     SaveStrategy,
     TrainerMemoryTracker,
     TrainOutput,
+    _is_peft_model,
     check_target_module_exists,
     default_compute_objective,
     denumpify_detensorize,
@@ -206,7 +207,7 @@ if is_sagemaker_mp_enabled():
     from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
 
 if is_peft_available():
-    from peft import PeftMixedModel, PeftModel
+    from peft import PeftModel
 
 if is_accelerate_available():
     from accelerate import Accelerator, skip_first_batches
@@ -225,13 +226,6 @@ if is_accelerate_available():
 
     if is_deepspeed_available():
         from accelerate.utils import DeepSpeedSchedulerWrapper
-
-
-def _is_peft_model(model):
-    if is_peft_available():
-        classes_to_check = (PeftModel, PeftMixedModel)
-        return isinstance(model, classes_to_check)
-    return False
 
 
 def _get_fsdp_ckpt_kwargs():

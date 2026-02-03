@@ -20,17 +20,7 @@ Paper: https://huggingface.co/papers/2310.05914
 
 import torch
 
-from ..utils import is_peft_available
-
-
-if is_peft_available():
-    from peft import PeftMixedModel, PeftModel
-
-
-def _is_peft_model(model):
-    if is_peft_available():
-        return isinstance(model, (PeftModel, PeftMixedModel))
-    return False
+from ..trainer_utils import _is_peft_model
 
 
 def neftune_post_forward_hook(module, input, output):
