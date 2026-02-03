@@ -340,6 +340,13 @@ class DeepseekV32Indexer(nn.Module):
         return topk_indices
 
 
+def weight_dequant(weight, scale, block_size =128):
+    shape = weight.shape
+    assert weight.dim() == 2
+    weight = weight.view(shape[0] // block_size, block_size, shape[1] // block_size, block_size).transpose(1, 2).contiguous().view(-1, block_size * block_size)
+    weight = (weight.float() * scale.view(-1, 1).float()).to(torch.get_default_dtype()).view(shape[0] // block_size, shape[1] // block_size, block_size, block_size).transpose(1, 2).contiguous().view(shape)
+    return weight
+
 class DeepseekV32Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
@@ -443,7 +450,11 @@ class DeepseekV32Attention(nn.Module):
             x = torch.einsum("bsht,bthd->bshd", scores, v)
 
         else:
-            q_pass = torch.einsum("bshd,hdc->bshc", q_pass, self.wkv_b[:, :self.qk_nope_head_dim])
+            # now last hickup: they dequantize on the fly....
+            # self.kv_b_proj
+            self.dequant_kv_b = weight_dequant(self.kv_b_proj.weight.data, self.kv_b_proj.weight_scale_inv.data).to(q_pass.dtype)
+            wkv_b = self.dequant_kv_b.view(self.num_heads, -1, self.kv_lora_rank)
+            q_pass = torch.einsum("bshd,hdc->bshc", q_pass, wkv_b[:, :self.qk_nope_head_dim])
             q_rot = torch.einsum("bshr,btr->bsht", q_rot, cached_pe)
 
             scores = (torch.einsum("bshc,btc->bsht", q_pass, cached_kv) + q_rot ) * self.softmax_scale
@@ -455,7 +466,7 @@ class DeepseekV32Attention(nn.Module):
 
             scores = scores.softmax(dim=-1)
             x = torch.einsum("bsht,btc->bshc", scores, cached_kv)
-            x = torch.einsum("bshc,hdc->bshd", x, self.wkv_b[:, -self.v_head_dim:])
+            x = torch.einsum("bshc,hdc->bshd", x, wkv_b[:, -self.v_head_dim:])
 
         # Output projection
         attn_output = x.transpose(1, 2).reshape(B, S, -1).contiguous()  # [B,S,H*V]
