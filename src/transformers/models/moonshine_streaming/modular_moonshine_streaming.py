@@ -125,7 +125,6 @@ class MoonshineStreamingLayerNorm(nn.Module):
         self.unit_offset = float(unit_offset)
         self.ln = nn.LayerNorm(dim, elementwise_affine=False, device=device, dtype=dtype)
         self.gamma = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
-        nn.init.constant_(self.gamma, 1.0 - self.unit_offset)
 
     def forward(self, x: Tensor) -> Tensor:
         normed = self.ln(x)
@@ -245,6 +244,13 @@ class MoonshineStreamingPreTrainedModel(MoonshinePreTrainedModel):
         output_lengths = (output_lengths - 1) // 2 + 1
         output_lengths = (output_lengths - 1) // 2 + 1
         return output_lengths
+
+    def _init_weights(self, module: nn.Module):
+        std = self.config.initializer_range if hasattr(self.config, "initializer_range") else 0.02
+        if isinstance(module, MoonshineStreamingLayerNorm):
+            nn.init.constant_(module.gamma, 1.0 - module.unit_offset)
+        else:
+            super()._init_weights(module)
 
 
 def sliding_window_mask_function(sliding_window: tuple[int, int], is_causal=True) -> Callable:
