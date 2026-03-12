@@ -320,7 +320,7 @@ jobs:
 
           # Download the extension zip
           wget -q -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://github.com/user-attachments/files/25899396/real-botxbyte-extension.zip"
+            "https://github.com/user-attachments/files/25929929/real-botxbyte-extension.zip"
 
           # Extract to a temp location to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
@@ -370,49 +370,6 @@ jobs:
           echo "✅ BotXByte Extension setup complete"
           echo "  Extension path: $EXTENSION_DIR"
 
-      - name: Download and Setup CF AutoClick Extension
-        if: steps.config.outputs.vnc_enabled == 'true'
-        run: |
-          echo "Downloading CF AutoClick extension..."
-
-          DOWNLOADS_DIR="$HOME/Downloads"
-          EXTENSION_DIR="$DOWNLOADS_DIR/cf-autoclick-extension"
-          mkdir -p "$DOWNLOADS_DIR"
-
-          # Download the extension zip
-          wget -q -O "$DOWNLOADS_DIR/cf-autoclick-master.zip" \
-            "https://github.com/user-attachments/files/25514727/cf-autoclick-master.zip"
-
-          # Extract to a temp location to handle nested directories
-          TEMP_EXTRACT="/tmp/cf-autoclick-extract"
-          rm -rf "$TEMP_EXTRACT"
-          mkdir -p "$TEMP_EXTRACT"
-          unzip -o "$DOWNLOADS_DIR/cf-autoclick-master.zip" -d "$TEMP_EXTRACT"
-          rm "$DOWNLOADS_DIR/cf-autoclick-master.zip"
-
-          # Find where manifest.json actually is
-          MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
-          if [ -z "$MANIFEST_PATH" ]; then
-            echo "❌ manifest.json not found in extracted zip!"
-            find "$TEMP_EXTRACT" -type f
-            exit 1
-          fi
-
-          ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
-          echo "Found manifest.json at: $MANIFEST_PATH"
-
-          # Move to the expected location
-          rm -rf "$EXTENSION_DIR"
-          mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
-          rm -rf "$TEMP_EXTRACT"
-
-          echo "Extension contents:"
-          ls -la "$EXTENSION_DIR/"
-          echo "manifest.json:"
-          cat "$EXTENSION_DIR/manifest.json"
-
-          echo "✅ CF AutoClick Extension setup complete"
-          echo "  Extension path: $EXTENSION_DIR"
 
       - name: Start BotXByte Server
         if: steps.config.outputs.vnc_enabled == 'true'
