@@ -110,7 +110,56 @@ jobs:
           echo "  Webshare: $WEBSHARE_ENABLED"
           echo "  User ID: $USER_ID"
           echo "  Workspace ID: $WORKSPACE_ID"
-      
+
+      # ── Caching steps to speed up subsequent runs ──
+      - name: Cache APT packages
+        if: steps.config.outputs.vnc_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-apt
+        with:
+          path: /var/cache/apt/archives
+          key: apt-desktop-xfce4-ffmpeg-v1
+
+      - name: Cache Google Chrome deb
+        if: steps.config.outputs.vnc_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-chrome
+        with:
+          path: ~/cached-debs/google-chrome-stable_current_amd64.deb
+          key: chrome-stable-v1
+
+      - name: Cache TurboVNC deb
+        if: steps.config.outputs.vnc_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-turbovnc
+        with:
+          path: ~/cached-debs/turbovnc_2.2.5_amd64.deb
+          key: turbovnc-2.2.5
+
+      - name: Cache noVNC
+        if: steps.config.outputs.vnc_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-novnc
+        with:
+          path: ~/noVNC
+          key: novnc-websockify-v1
+
+      - name: Cache cloudflared deb
+        if: steps.config.outputs.cloudflare_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-cloudflared
+        with:
+          path: ~/cached-debs/cloudflared-linux-amd64.deb
+          key: cloudflared-v1
+
+      - name: Cache BotXByte Extension
+        if: steps.config.outputs.vnc_enabled == 'true'
+        uses: actions/cache@v4
+        id: cache-botxbyte
+        with:
+          path: ~/Downloads/real-botxbyte-extension
+          key: botxbyte-extension-v1
+
       - name: Register IP with Webshare
         if: steps.config.outputs.webshare_enabled == 'true'
         id: webshare
@@ -160,6 +209,10 @@ jobs:
         run: |
           echo "Installing XFCE desktop environment..."
 
+          if [ "${{ steps.cache-apt.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ APT cache hit — skipping downloads for cached packages"
+          fi
+
           # Kill unattended-upgrades to prevent dpkg lock contention
           sudo systemctl stop unattended-upgrades 2>/dev/null || true
           sudo killall -9 unattended-upgrades 2>/dev/null || true
@@ -195,9 +248,14 @@ jobs:
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
           echo "Installing Google Chrome..."
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo dpkg -i google-chrome-stable_current_amd64.deb || sudo apt-get install -f -y
-          rm google-chrome-stable_current_amd64.deb
+          CHROME_DEB="$HOME/cached-debs/google-chrome-stable_current_amd64.deb"
+          if [ ! -f "$CHROME_DEB" ]; then
+            mkdir -p ~/cached-debs
+            wget -q -O "$CHROME_DEB" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          else
+            echo "Using cached Chrome .deb"
+          fi
+          sudo dpkg -i "$CHROME_DEB" || sudo apt-get install -f -y
           google-chrome --version
           echo "✅ Google Chrome installed"
 
@@ -237,18 +295,28 @@ jobs:
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
           echo "Installing TurboVNC server..."
-          wget -q https://phoenixnap.dl.sourceforge.net/project/turbovnc/2.2.5/turbovnc_2.2.5_amd64.deb
-          sudo dpkg -i turbovnc_2.2.5_amd64.deb
-          rm turbovnc_2.2.5_amd64.deb
+          TURBOVNC_DEB="$HOME/cached-debs/turbovnc_2.2.5_amd64.deb"
+          if [ ! -f "$TURBOVNC_DEB" ]; then
+            mkdir -p ~/cached-debs
+            wget -q -O "$TURBOVNC_DEB" https://phoenixnap.dl.sourceforge.net/project/turbovnc/2.2.5/turbovnc_2.2.5_amd64.deb
+          else
+            echo "Using cached TurboVNC .deb"
+          fi
+          sudo dpkg -i "$TURBOVNC_DEB"
 
       - name: Install noVNC (Web VNC)
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
-          echo "Installing noVNC for web-based access..."
-          cd ~
-          git clone https://github.com/novnc/noVNC.git
-          cd noVNC
-          git clone https://github.com/novnc/websockify.git
+          if [ -d "$HOME/noVNC/utils" ] && [ -d "$HOME/noVNC/websockify" ]; then
+            echo "✅ Using cached noVNC"
+          else
+            echo "Installing noVNC for web-based access..."
+            rm -rf ~/noVNC
+            cd ~
+            git clone https://github.com/novnc/noVNC.git
+            cd noVNC
+            git clone https://github.com/novnc/websockify.git
+          fi
 
       - name: Configure VNC Server
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -309,7 +377,7 @@ jobs:
       - name: Download and Setup BotXByte Extension
         if: steps.config.outputs.vnc_enabled == 'true'
         run: |
-          echo "Downloading BotXByte extension..."
+          echo "Setting up BotXByte extension..."
 
           # Install python3-venv
           sudo apt-get install -y python3 python3-venv
@@ -318,37 +386,44 @@ jobs:
           EXTENSION_DIR="$DOWNLOADS_DIR/real-botxbyte-extension"
           mkdir -p "$DOWNLOADS_DIR"
 
-          # Download the extension zip
-          wget -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://raw.githubusercontent.com/sanket-sakariya/test-abc/main/real-botxbyte-extension.zip"
+          # Use cached extension if available, otherwise download
+          if [ -f "$EXTENSION_DIR/manifest.json" ]; then
+            echo "✅ Using cached BotXByte extension"
+          else
+            echo "Downloading BotXByte extension..."
 
-          # Extract to a temp location to handle nested directories
-          TEMP_EXTRACT="/tmp/extension-extract"
-          rm -rf "$TEMP_EXTRACT"
-          mkdir -p "$TEMP_EXTRACT"
-          unzip -o "$DOWNLOADS_DIR/real-botxbyte-extension.zip" -d "$TEMP_EXTRACT"
-          rm "$DOWNLOADS_DIR/real-botxbyte-extension.zip"
+            # Download the extension zip
+            wget -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
+              "https://raw.githubusercontent.com/sanket-sakariya/test-abc/main/real-botxbyte-extension.zip"
 
-          # Find where manifest.json actually is
-          MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
-          if [ -z "$MANIFEST_PATH" ]; then
-            echo "❌ manifest.json not found in extracted zip!"
-            find "$TEMP_EXTRACT" -type f
-            exit 1
+            # Extract to a temp location to handle nested directories
+            TEMP_EXTRACT="/tmp/extension-extract"
+            rm -rf "$TEMP_EXTRACT"
+            mkdir -p "$TEMP_EXTRACT"
+            unzip -o "$DOWNLOADS_DIR/real-botxbyte-extension.zip" -d "$TEMP_EXTRACT"
+            rm "$DOWNLOADS_DIR/real-botxbyte-extension.zip"
+
+            # Find where manifest.json actually is
+            MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
+            if [ -z "$MANIFEST_PATH" ]; then
+              echo "❌ manifest.json not found in extracted zip!"
+              find "$TEMP_EXTRACT" -type f
+              exit 1
+            fi
+
+            ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
+            echo "Found manifest.json at: $MANIFEST_PATH"
+
+            # Move to the expected location
+            rm -rf "$EXTENSION_DIR"
+            mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
+            rm -rf "$TEMP_EXTRACT"
+
+            # Clean up stale/non-extension files
+            rm -rf "$EXTENSION_DIR/_metadata" 2>/dev/null || true
+            rm -rf "$EXTENSION_DIR/.git" 2>/dev/null || true
+            rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
           fi
-
-          ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
-          echo "Found manifest.json at: $MANIFEST_PATH"
-
-          # Move to the expected location
-          rm -rf "$EXTENSION_DIR"
-          mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
-          rm -rf "$TEMP_EXTRACT"
-
-          # Clean up stale/non-extension files
-          rm -rf "$EXTENSION_DIR/_metadata" 2>/dev/null || true
-          rm -rf "$EXTENSION_DIR/.git" 2>/dev/null || true
-          rm -f "$EXTENSION_DIR/.gitignore" "$EXTENSION_DIR/README.md" "$EXTENSION_DIR/llm.txt"
 
           echo "Extension contents:"
           ls -la "$EXTENSION_DIR/"
@@ -357,7 +432,9 @@ jobs:
 
           # Set up Python virtual environment and install requirements
           cd "$EXTENSION_DIR"
-          python3 -m venv venv
+          if [ ! -d "venv" ]; then
+            python3 -m venv venv
+          fi
           source venv/bin/activate
 
           if [ -f requirements.txt ]; then
@@ -556,8 +633,14 @@ jobs:
             sleep 5
           done
 
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+          CLOUDFLARED_DEB="$HOME/cached-debs/cloudflared-linux-amd64.deb"
+          if [ ! -f "$CLOUDFLARED_DEB" ]; then
+            mkdir -p ~/cached-debs
+            wget -q -O "$CLOUDFLARED_DEB" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          else
+            echo "Using cached cloudflared .deb"
+          fi
+          sudo dpkg -i "$CLOUDFLARED_DEB"
           cloudflared --version
 
       - name: Create Cloudflare Tunnel
