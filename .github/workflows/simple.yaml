@@ -100,7 +100,7 @@ jobs:
             echo "✅ Webshare Config Loaded"
           fi
 
-          # Parse optional workflow_ids (JSON array) for auto-task dispatch
+          # Parse optional workflow_ids for auto-task dispatch (JSON array)
           WORKFLOW_IDS=$(echo "$CONFIG" | jq -c '.workflow_ids // []')
           echo "workflow_ids=$WORKFLOW_IDS" >> $GITHUB_OUTPUT
 
@@ -188,7 +188,8 @@ jobs:
             dbus-x11 \
             x11-utils \
             x11-xserver-utils \
-            xfonts-base
+            xfonts-base \
+            ffmpeg
 
       - name: Install Google Chrome
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -318,8 +319,8 @@ jobs:
           mkdir -p "$DOWNLOADS_DIR"
 
           # Download the extension zip
-          wget -q -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
-            "https://github.com/user-attachments/files/25457672/real-botxbyte-extension.zip"
+          wget -O "$DOWNLOADS_DIR/real-botxbyte-extension.zip" \
+            "https://raw.githubusercontent.com/sanket-sakariya/test-abc/main/real-botxbyte-extension.zip"
 
           # Extract to a temp location to handle nested directories
           TEMP_EXTRACT="/tmp/extension-extract"
@@ -369,49 +370,6 @@ jobs:
           echo "✅ BotXByte Extension setup complete"
           echo "  Extension path: $EXTENSION_DIR"
 
-      - name: Download and Setup CF AutoClick Extension
-        if: steps.config.outputs.vnc_enabled == 'true'
-        run: |
-          echo "Downloading CF AutoClick extension..."
-
-          DOWNLOADS_DIR="$HOME/Downloads"
-          EXTENSION_DIR="$DOWNLOADS_DIR/cf-autoclick-extension"
-          mkdir -p "$DOWNLOADS_DIR"
-
-          # Download the extension zip
-          wget -q -O "$DOWNLOADS_DIR/cf-autoclick-master.zip" \
-            "https://github.com/user-attachments/files/25514727/cf-autoclick-master.zip"
-
-          # Extract to a temp location to handle nested directories
-          TEMP_EXTRACT="/tmp/cf-autoclick-extract"
-          rm -rf "$TEMP_EXTRACT"
-          mkdir -p "$TEMP_EXTRACT"
-          unzip -o "$DOWNLOADS_DIR/cf-autoclick-master.zip" -d "$TEMP_EXTRACT"
-          rm "$DOWNLOADS_DIR/cf-autoclick-master.zip"
-
-          # Find where manifest.json actually is
-          MANIFEST_PATH=$(find "$TEMP_EXTRACT" -name "manifest.json" -type f | head -1)
-          if [ -z "$MANIFEST_PATH" ]; then
-            echo "❌ manifest.json not found in extracted zip!"
-            find "$TEMP_EXTRACT" -type f
-            exit 1
-          fi
-
-          ACTUAL_EXT_DIR=$(dirname "$MANIFEST_PATH")
-          echo "Found manifest.json at: $MANIFEST_PATH"
-
-          # Move to the expected location
-          rm -rf "$EXTENSION_DIR"
-          mv "$ACTUAL_EXT_DIR" "$EXTENSION_DIR"
-          rm -rf "$TEMP_EXTRACT"
-
-          echo "Extension contents:"
-          ls -la "$EXTENSION_DIR/"
-          echo "manifest.json:"
-          cat "$EXTENSION_DIR/manifest.json"
-
-          echo "✅ CF AutoClick Extension setup complete"
-          echo "  Extension path: $EXTENSION_DIR"
 
       - name: Start BotXByte Server
         if: steps.config.outputs.vnc_enabled == 'true'
@@ -534,10 +492,70 @@ jobs:
             exit 1
           fi
 
+      - name: Check Developer Mode and Update DB
+        if: steps.config.outputs.vnc_enabled == 'true'
+        run: |
+          echo "Checking Chrome developer_mode status..."
+
+          PROFILE_DIR="${{ steps.browser_profile.outputs.browser_profile_dir }}"
+          BROWSER_PROFILE_ID="${{ steps.config.outputs.browser_profile_id }}"
+          USER_ID="${{ steps.config.outputs.user_id }}"
+          WORKSPACE_ID="${{ steps.config.outputs.workspace_id }}"
+
+          # Search for "developer_mode":true in the browser profile preferences
+          IS_CHROME_EXTENSION="false"
+          if grep -rq '"developer_mode":true' "$PROFILE_DIR/" 2>/dev/null; then
+            IS_CHROME_EXTENSION="true"
+            echo "✅ developer_mode is TRUE → setting is_chrome_extension=true"
+          else
+            echo "ℹ️ developer_mode is not true (or not found) → is_chrome_extension=false"
+          fi
+
+          echo "is_chrome_extension: $IS_CHROME_EXTENSION"
+
+          # Log the grep results for debugging
+          echo "--- Developer mode grep results ---"
+          grep -ro '"developer_mode":[^,}]*' "$PROFILE_DIR/" 2>/dev/null || echo "  No developer_mode entries found"
+          echo "---"
+
+          # Update is_chrome_extension in the database via PATCH API
+          if [ -n "$BROWSER_PROFILE_ID" ] && [ "$BROWSER_PROFILE_ID" != "null" ]; then
+            RESPONSE=$(curl -s --connect-timeout 10 --max-time 30 \
+              "http://129.212.196.173/ai-management-service/api/v1/browser-profile/${BROWSER_PROFILE_ID}" \
+              -X PATCH \
+              -H "Content-Type: application/json" \
+              -H "user-id: ${USER_ID}" \
+              -H "workspace-id: ${WORKSPACE_ID}" \
+              -d "{\"is_chrome_extension\": ${IS_CHROME_EXTENSION}}")
+
+            SUCCESS=$(echo "$RESPONSE" | jq -r '.success // false')
+            if [ "$SUCCESS" = "true" ]; then
+              echo "✅ Browser profile updated: is_chrome_extension=$IS_CHROME_EXTENSION"
+            else
+              echo "⚠️ Failed to update is_chrome_extension (non-fatal)"
+              echo "$RESPONSE" | jq '.' 2>/dev/null || echo "$RESPONSE"
+            fi
+          else
+            echo "⚠️ No browser_profile_id, skipping is_chrome_extension DB update"
+          fi
+
       - name: Install cloudflared
         if: steps.config.outputs.cloudflare_enabled == 'true'
         run: |
           echo "Installing cloudflared..."
+
+          # Release dpkg lock held by unattended-upgrades (may still be running
+          # on a fresh Ubuntu runner if the VNC Desktop Environment step was skipped)
+          sudo systemctl stop unattended-upgrades 2>/dev/null || true
+          sudo killall -9 unattended-upgrades 2>/dev/null || true
+          for i in $(seq 1 12); do
+            if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for dpkg lock to release... ($i/12)"
+            sleep 5
+          done
+
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           cloudflared --version
@@ -722,7 +740,7 @@ jobs:
             BODY="${BODY}, \"cloudflare_tunnel_credential_id\": \"${CLOUDFLARE_TUNNEL_CREDENTIAL_ID}\""
           fi
 
-          # Append optional workflow_ids (JSON array) for auto-task dispatch
+          # Append optional workflow_ids for auto-task dispatch (JSON array)
           if [ -n "$WORKFLOW_IDS" ] && [ "$WORKFLOW_IDS" != "null" ] && [ "$WORKFLOW_IDS" != "[]" ]; then
             BODY="${BODY}, \"workflow_ids\": ${WORKFLOW_IDS}"
           fi
@@ -840,9 +858,6 @@ jobs:
               google-chrome \
                 --no-first-run \
                 --no-default-browser-check \
-                --disable-gpu \
-                --no-sandbox \
-                --disable-dev-shm-usage \
                 --user-data-dir="$PROFILE_DIR" \
                 2>/tmp/chrome-stderr.log &
               sleep 5
@@ -995,7 +1010,7 @@ jobs:
           echo "✅ VNC cleanup complete"
 
       - name: Upload Browser Profile to Wasabi
-        if: success() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
+        if: always() && steps.config.outputs.vnc_enabled == 'true' && steps.config.outputs.wasabi_access_key != ''
         timeout-minutes: 5
         env:
           AWS_ACCESS_KEY_ID: ${{ steps.config.outputs.wasabi_access_key }}
