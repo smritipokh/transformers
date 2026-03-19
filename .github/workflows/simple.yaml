@@ -15,7 +15,7 @@ env:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 380
     
     steps:
       - name: Checkout
@@ -126,12 +126,22 @@ jobs:
           WORKFLOW_IDS=$(echo "$CONFIG" | jq -c '.workflow_ids // []')
           echo "workflow_ids=$WORKFLOW_IDS" >> $GITHUB_OUTPUT
 
+          # Parse profile timeout (minutes), default 45 min, max 360 min (6 hours)
+          PROFILE_TIMEOUT_MINUTES=$(echo "$CONFIG" | jq -r '.profile_timeout_minutes // "45"')
+          # Clamp to valid range
+          if [ "$PROFILE_TIMEOUT_MINUTES" -lt 45 ] 2>/dev/null; then PROFILE_TIMEOUT_MINUTES=45; fi
+          if [ "$PROFILE_TIMEOUT_MINUTES" -gt 360 ] 2>/dev/null; then PROFILE_TIMEOUT_MINUTES=360; fi
+          PROFILE_TIMEOUT_SECONDS=$((PROFILE_TIMEOUT_MINUTES * 60))
+          echo "profile_timeout_minutes=$PROFILE_TIMEOUT_MINUTES" >> $GITHUB_OUTPUT
+          echo "profile_timeout_seconds=$PROFILE_TIMEOUT_SECONDS" >> $GITHUB_OUTPUT
+
           echo "✅ Config Loaded:"
           echo "  VNC: $VNC_ENABLED"
           echo "  Cloudflare: $CLOUDFLARE_ENABLED"
           echo "  Webshare: $WEBSHARE_ENABLED"
           echo "  User ID: $USER_ID"
           echo "  Workspace ID: $WORKSPACE_ID"
+          echo "  Profile Timeout: ${PROFILE_TIMEOUT_MINUTES} min"
       
       - name: Register IP with Webshare
         if: steps.config.outputs.webshare_enabled == 'true'
@@ -860,8 +870,11 @@ jobs:
 
           echo "Keeping VNC session alive..."
 
-          # Monitor for 45 mins (2700 seconds)
-          END_TIME=$((SECONDS + 2700))
+          # Monitor for configured timeout (default 45 min)
+          TIMEOUT_SECONDS=${{ steps.config.outputs.profile_timeout_seconds }}
+          TIMEOUT_MINUTES=${{ steps.config.outputs.profile_timeout_minutes }}
+          echo "⏱️ Profile timeout: ${TIMEOUT_MINUTES} minutes (${TIMEOUT_SECONDS} seconds)"
+          END_TIME=$((SECONDS + TIMEOUT_SECONDS))
 
           while [ $SECONDS -lt $END_TIME ]; do
             REMAINING=$((END_TIME - SECONDS))
